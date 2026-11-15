@@ -10,6 +10,7 @@
 
 use crate::archive::Archive;
 use crate::fb::{Table, get, u16_at, u32_at};
+use crate::skeleton::Local;
 use anyhow::{Result, anyhow, bail};
 use three_d::{InnerSpace, Quat, Vec3};
 
@@ -186,10 +187,14 @@ impl Blend for Vec3 {
 }
 impl Blend for Quat {
     fn blend(a: Self, b: Self, t: f32) -> Self {
-        // nlerp along the shorter arc
-        let b = if a.dot(b) < 0.0 { -b } else { b };
-        (a * (1.0 - t) + b * t).normalize()
+        nlerp(a, b, t)
     }
+}
+
+/// Normalized linear interpolation of two rotations, along the shorter arc.
+pub fn nlerp(a: Quat, b: Quat, t: f32) -> Quat {
+    let b = if a.dot(b) < 0.0 { -b } else { b };
+    (a * (1.0 - t) + b * t).normalize()
 }
 
 fn sample<T: Blend>(track: &Track<T>, frame: f32) -> Option<T> {
@@ -219,6 +224,17 @@ fn sample<T: Blend>(track: &Track<T>, frame: f32) -> Option<T> {
                 0.0
             };
             Some(T::blend(v[k - 1], v[k], t))
+        }
+    }
+}
+
+impl Sample {
+    /// The full local transform, with the parts the track leaves out taken from `rest`.
+    pub fn or_rest(&self, rest: Local) -> Local {
+        Local {
+            scale: self.scale.unwrap_or(rest.scale),
+            rotation: self.rotation.unwrap_or(rest.rotation),
+            translation: self.translation.unwrap_or(rest.translation),
         }
     }
 }

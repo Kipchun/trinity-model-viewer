@@ -6,7 +6,9 @@ A desktop viewer for the 3D models of games built on Game Freak's Trinity engine
 - **Models**: every Pokémon model in the archive, with all its parts and detail levels (LODs)
 - **Textures**: colour and normal maps, including the layered tint colours the game uses for eyes, flames and bodies
 - **Skeletons**: the bone hierarchy, with bind and rest pose, drawn over or through the mesh
-- **Animations**: all of a model's animations (idle, walk, run, battle moves and more), with the mesh skinned to the bones
+- **Animations**: all of a model's animations (idle, walk, run, battle moves and more), with the mesh skinned to the bones;
+  crossfades between animations and blends two at once
+- **Play mode** (F7): walk, run and jump the model around to see its animations hand over to each other
 
 **No game files are included.** You need your own dump of the game's RomFS, made from a copy you own.
 The viewer reads it in place and never changes it.
@@ -29,8 +31,17 @@ The viewer reads it in place and never changes it.
 ## Using it
 
 - **Left panel**: search and pick a model (e.g. `pm0025` or `0006`). Choose how it is drawn: textures, a colour per
-  material, or plain. Turn the mesh, floor and skeleton on and off, and pick the level of detail. The **Animation**
-  section plays any of the model's animations, with play/pause, loop, a frame slider and speed.
+  material, or plain, and lit softly from all sides (**Unlit**) or by one sun that casts shadows on the floor
+  (**Lit**). Turn the mesh, floor and skeleton on and off, and pick the level of detail. The **Animation**
+  section plays any of the model's animations, with play/pause, loop, a frame slider and speed. Switching animation
+  crossfades from the current pose (the time is adjustable; 0 switches at once). **Blend with** mixes a second
+  animation over the first with a weight slider; with **Sync** on, both stay at the same point of their cycle
+  (useful for idle/walk/run mixes), otherwise the second plays at its own rate.
+- **Play mode** (F7, or the button in the left panel): control the model like a game character. WASD or the arrow
+  keys move it relative to the camera, Shift runs, Space jumps, F7 or Esc leaves. Idle, walk and run are blended
+  by speed, with walk and run kept in step; the speeds come from the clips' own root motion, so the feet do not
+  slide. A jump plays take-off, rising, fall and landing in turn, with the crossfade between each. The panel shows
+  the state, speed and blend weights, and which clips the model provides.
 - **Right panel**: the model's files, parts and materials, and its skeleton as a tree; click a bone to highlight it
   and see its transform.
 - **Mouse**: left drag orbits, right drag pans, the wheel zooms.
@@ -42,6 +53,7 @@ Command-line options:
 | `<folder>` | use this RomFS folder (and remember it) |
 | `--model pm0006_00_00` | start with this model |
 | `--anim walk01` | start the first animation whose name contains this text |
+| `--lit` | start in Lit mode (one sun with shadows) |
 | `--skeleton` | start with the skeleton shown |
 | `--check` | load every model once and report failures, without opening a window |
 

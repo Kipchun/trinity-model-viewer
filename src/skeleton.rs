@@ -36,37 +36,53 @@ pub struct Skeleton {
     joint_bone: Vec<Option<usize>>,
 }
 
-/// A bone's local transform in an animation frame; `None` parts keep the rest pose.
-pub struct LocalOverride {
-    pub scale: Option<Vec3>,
-    pub rotation: Option<Quat>,
-    pub translation: Option<Vec3>,
+/// A bone's local transform: scale, rotation, translation (the matrix is T * R * S).
+#[derive(Clone, Copy)]
+pub struct Local {
+    pub scale: Vec3,
+    pub rotation: Quat,
+    pub translation: Vec3,
+}
+
+impl Local {
+    /// `a` at t = 0, `b` at t = 1: scale and translation interpolate linearly, rotation along the shorter arc.
+    pub fn lerp(a: Local, b: Local, t: f32) -> Local {
+        Local {
+            scale: a.scale + (b.scale - a.scale) * t,
+            rotation: crate::anim::nlerp(a.rotation, b.rotation, t),
+            translation: a.translation + (b.translation - a.translation) * t,
+        }
+    }
+
+    pub fn matrix(&self) -> Mat4 {
+        let s = self.scale;
+        Mat4::from_translation(self.translation)
+            * Mat4::from(self.rotation)
+            * Mat4::from_nonuniform_scale(s.x, s.y, s.z)
+    }
 }
 
 impl Skeleton {
-    /// World matrices of all bones with some local transforms replaced (an animation frame). `local(i)` gives
-    /// bone i's override, if any.
-    pub fn posed_world(&self, local: impl Fn(usize) -> Option<LocalOverride>) -> Vec<Mat4> {
+    /// Bone i's local transform in the rest pose (where animations start).
+    pub fn rest_local(&self, i: usize) -> Local {
+        let b = &self.bones[i];
+        Local {
+            scale: Vec3::from(b.scale),
+            rotation: Quat::from_angle_z(three_d::radians(b.rotation[2]))
+                * Quat::from_angle_y(three_d::radians(b.rotation[1]))
+                * Quat::from_angle_x(three_d::radians(b.rotation[0])),
+            translation: Vec3::from(b.translation),
+        }
+    }
+
+    /// World matrices of all bones from their local transforms (one per bone, e.g. an animation frame).
+    pub fn posed_world(&self, local: &[Local]) -> Vec<Mat4> {
         let mut world = vec![Mat4::identity(); self.bones.len()];
         for &i in &self.order {
-            let b = &self.bones[i];
-            let rest_rot = Quat::from_angle_z(three_d::radians(b.rotation[2]))
-                * Quat::from_angle_y(three_d::radians(b.rotation[1]))
-                * Quat::from_angle_x(three_d::radians(b.rotation[0]));
-            let o = local(i);
-            let s = o
-                .as_ref()
-                .and_then(|o| o.scale)
-                .unwrap_or(Vec3::from(b.scale));
-            let r = o.as_ref().and_then(|o| o.rotation).unwrap_or(rest_rot);
-            let t = o
-                .as_ref()
-                .and_then(|o| o.translation)
-                .unwrap_or(Vec3::from(b.translation));
-            let m = Mat4::from_translation(t)
-                * Mat4::from(r)
-                * Mat4::from_nonuniform_scale(s.x, s.y, s.z);
-            world[i] = match b.parent.filter(|p| *p < self.bones.len()) {
+            let m = local
+                .get(i)
+                .map_or_else(|| self.rest_local(i).matrix(), Local::matrix);
+            world[i] = match self.bones[i].parent.filter(|p| *p < self.bones.len()) {
                 Some(p) => world[p] * m,
                 None => m,
             };

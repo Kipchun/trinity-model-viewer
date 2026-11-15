@@ -6,13 +6,16 @@
 //!   cargo run --release -- --check      loads every model once and prints failures, without a window
 //!   cargo run --release -- --model pm0006_00_00   starts with that model selected
 //!   cargo run --release -- --skeleton             starts with the skeleton shown
+//!   cargo run --release -- --lit                  starts in Lit mode (one sun with shadows)
 //!   cargo run --release -- --anim walk01          starts the first animation whose name contains that text
 //!
 //! Mouse: left drag orbits, right drag pans, wheel zooms.
+//! F7: play mode (see demo.rs): WASD or arrows move, Shift runs, Space jumps; F7 or Esc leaves it.
 
 mod anim;
 mod archive;
 mod config;
+mod demo;
 mod fb;
 mod materials;
 mod model;
@@ -85,6 +88,16 @@ enum Shading {
     Plain,
 }
 
+/// Unlit: soft light from all round, every side readable. Lit: one sun with shadows, so form and height show.
+#[derive(Clone, Copy, PartialEq)]
+enum Lighting {
+    Unlit,
+    Lit,
+}
+
+/// Shadow map size of the sun in Lit mode.
+const SHADOW_MAP_SIZE: u32 = 2048;
+
 struct Loaded {
     model: model::Model,
     baked: HashMap<String, materials::Baked>,
@@ -96,62 +109,63 @@ struct Loaded {
 }
 
 struct SkinPart {
-    /// Parts of the same shape share their vertices, so they are skinned once per frame.
+    /// Parts of the same shape share their vertices, so their positions and normals are skinned once per frame.
     shape: String,
     positions: Vec<Vec3>,
     normals: Option<Vec<Vec3>>,
+    /// Tangents are this part's own: they are computed from its triangles only (NaN at the shape's other
+    /// vertices), and the handedness can differ between parts of one shape, so they are never shared.
     tangents: Option<Vec<Vec4>>,
     joints: Vec<[u8; 4]>,
     weights: Vec<[f32; 4]>,
 }
 
-type Skinned = (Vec<Vec3>, Option<Vec<Vec3>>, Option<Vec<Vec4>>);
+impl SkinPart {
+    /// Linear blend skinning: vertex v's matrix is the weighted average of its joints' skin matrices, or `None`
+    /// when it has no usable joint (it then stays where it is).
+    fn matrix(&self, v: usize, mats: &[Mat4]) -> Option<Mat4> {
+        let (j, w) = (self.joints[v], self.weights[v]);
+        let mut sum = Mat4::from_scale(0.0);
+        let mut total = 0.0;
+        for k in 0..4 {
+            if let Some(m) = mats.get(j[k] as usize).filter(|_| w[k] > 0.0) {
+                sum += m * w[k];
+                total += w[k];
+            }
+        }
+        (total > 0.0).then(|| sum / total)
+    }
+}
 
-/// Linear blend skinning on the CPU: each vertex is moved by the weighted sum of its joints' skin matrices.
+type Skinned = (Vec<Vec3>, Option<Vec<Vec3>>);
+
+/// Skinned positions and normals of a part (shared by every part of its shape).
 fn skin_part(part: &SkinPart, mats: &[Mat4]) -> Skinned {
     let n = part.positions.len();
     let mut pos = Vec::with_capacity(n);
     let mut nrm = part.normals.as_ref().map(|_| Vec::with_capacity(n));
-    let mut tan = part.tangents.as_ref().map(|_| Vec::with_capacity(n));
     for v in 0..n {
-        let (j, w) = (part.joints[v], part.weights[v]);
-        let mut p = Vec3::new(0.0, 0.0, 0.0);
-        let mut nn = Vec3::new(0.0, 0.0, 0.0);
-        let mut tt = Vec3::new(0.0, 0.0, 0.0);
-        let mut total = 0.0;
-        for k in 0..4 {
-            let Some(m) = mats.get(j[k] as usize).filter(|_| w[k] > 0.0) else {
-                continue;
-            };
-            total += w[k];
-            p += (m * part.positions[v].extend(1.0)).truncate() * w[k];
-            if let Some(ns) = &part.normals {
-                nn += (m * ns[v].extend(0.0)).truncate() * w[k];
-            }
-            if let Some(ts) = &part.tangents {
-                tt += (m * ts[v].truncate().extend(0.0)).truncate() * w[k];
-            }
-        }
-        if total <= 0.0 {
-            // no usable joint: leave the vertex where it is
-            pos.push(part.positions[v]);
-            if let (Some(o), Some(ns)) = (nrm.as_mut(), &part.normals) {
-                o.push(ns[v]);
-            }
-            if let (Some(o), Some(ts)) = (tan.as_mut(), &part.tangents) {
-                o.push(ts[v]);
-            }
-            continue;
-        }
-        pos.push(p / total);
-        if let Some(o) = nrm.as_mut() {
-            o.push(nn.normalize());
-        }
-        if let (Some(o), Some(ts)) = (tan.as_mut(), &part.tangents) {
-            o.push(tt.normalize().extend(ts[v].w));
+        let m = part.matrix(v, mats);
+        pos.push(m.map_or(part.positions[v], |m| (m * part.positions[v].extend(1.0)).truncate()));
+        if let (Some(o), Some(ns)) = (nrm.as_mut(), &part.normals) {
+            o.push(m.map_or(ns[v], |m| (m * ns[v].extend(0.0)).truncate().normalize()));
         }
     }
-    (pos, nrm, tan)
+    (pos, nrm)
+}
+
+/// Skinned tangents of one part (see [SkinPart::tangents]); the handedness in w is kept.
+fn skin_tangents(part: &SkinPart, mats: &[Mat4]) -> Option<Vec<Vec4>> {
+    let ts = part.tangents.as_ref()?;
+    Some(
+        ts.iter()
+            .enumerate()
+            .map(|(v, t)| match part.matrix(v, mats) {
+                Some(m) => (m * t.truncate().extend(0.0)).truncate().normalize().extend(t.w),
+                None => *t,
+            })
+            .collect(),
+    )
 }
 
 /// Poses every skinned part with the given skin matrices.
@@ -162,9 +176,10 @@ fn apply_skin(loaded: &mut Loaded, mats: &[Mat4]) {
     let mut done: HashMap<String, Skinned> = HashMap::new();
     for (gm, part) in loaded.meshes.iter_mut().zip(&loaded.skin) {
         let Some(part) = part else { continue };
-        let (pos, nrm, tan) = done
+        let (pos, nrm) = done
             .entry(part.shape.clone())
             .or_insert_with(|| skin_part(part, mats));
+        let tan = skin_tangents(part, mats);
         let mesh = &mut gm.geometry;
         // set_positions_partially also grows the culling box; it checks the length against the index count, so
         // fall back to a plain fill when there are more vertices than indices.
@@ -438,6 +453,176 @@ fn bone_tree(
         });
 }
 
+/// One playing animation: the clip, its clock (in frames), and for each bone the track that drives it.
+struct Clip {
+    anim: anim::Animation,
+    frame: f32,
+    track_of_bone: Vec<Option<usize>>,
+}
+
+impl Clip {
+    fn new(anim: anim::Animation, skel: Option<&skeleton::Skeleton>) -> Clip {
+        let track_of_bone = skel
+            .map(|s| {
+                s.bones
+                    .iter()
+                    .map(|b| anim.tracks.iter().position(|t| t.name == b.name))
+                    .collect()
+            })
+            .unwrap_or_default();
+        Clip {
+            anim,
+            frame: 0.0,
+            track_of_bone,
+        }
+    }
+
+    /// The last frame, where the clock wraps or stops.
+    fn last(&self) -> f32 {
+        (self.anim.frames.max(2) - 1) as f32
+    }
+
+    /// How far through the clip the clock is, 0 to 1.
+    fn phase(&self) -> f32 {
+        self.frame / self.last()
+    }
+
+    /// Moves the clock on by `seconds`; false when it reached the end without looping.
+    fn advance(&mut self, seconds: f32, looping: bool) -> bool {
+        self.frame += seconds * self.anim.fps as f32;
+        let last = self.last();
+        if self.frame > last {
+            if looping {
+                self.frame %= last;
+            } else {
+                self.frame = last;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Local transforms of all bones at the current frame; bones the clip does not drive keep the rest pose.
+    fn locals(&self, s: &skeleton::Skeleton) -> Vec<skeleton::Local> {
+        (0..s.bones.len())
+            .map(|i| {
+                let rest = s.rest_local(i);
+                match self.track_of_bone.get(i).copied().flatten() {
+                    Some(t) => self.anim.tracks[t].sample(self.frame).or_rest(rest),
+                    None => rest,
+                }
+            })
+            .collect()
+    }
+}
+
+/// Mixes pose `b` into pose `a` (per bone) with weight `t`: 0 keeps `a`, 1 gives `b`.
+fn mix_pose(a: &mut [skeleton::Local], b: &[skeleton::Local], t: f32) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x = skeleton::Local::lerp(*x, *y, t);
+    }
+}
+
+/// The ground of play mode: a large checkered square, so that movement shows. It is moved under the character
+/// in steps of one checker period (two tiles), which leaves the pattern in place.
+struct DemoFloor {
+    gm: Gm<Mesh, PhysicalMaterial>,
+    tile: f32,
+    y: f32,
+}
+
+impl DemoFloor {
+    fn new(context: &Context, tile: f32, y: f32) -> DemoFloor {
+        const N: u32 = 64; // texture size: one checker period
+        let (a, b) = ([74u8, 78, 88, 255], [58u8, 62, 70, 255]);
+        let data = (0..N * N)
+            .map(|i| if (i % N < N / 2) == (i / N < N / 2) { a } else { b })
+            .collect();
+        let periods = 60.0; // from the centre to each edge
+        let h = periods * 2.0 * tile;
+        let mesh = CpuMesh {
+            positions: Positions::F32(vec![
+                vec3(-h, 0.0, -h),
+                vec3(h, 0.0, -h),
+                vec3(h, 0.0, h),
+                vec3(-h, 0.0, h),
+            ]),
+            indices: Indices::U32(vec![0, 2, 1, 0, 3, 2]),
+            normals: Some(vec![vec3(0.0, 1.0, 0.0); 4]),
+            uvs: Some(vec![
+                vec2(0.0, 0.0),
+                vec2(periods * 2.0, 0.0),
+                vec2(periods * 2.0, periods * 2.0),
+                vec2(0.0, periods * 2.0),
+            ]),
+            ..Default::default()
+        };
+        let material = CpuMaterial {
+            albedo: Srgba::WHITE,
+            albedo_texture: Some(CpuTexture {
+                data: TextureData::RgbaU8(data),
+                width: N,
+                height: N,
+                ..Default::default()
+            }),
+            roughness: 1.0,
+            ..Default::default()
+        };
+        DemoFloor {
+            gm: Gm::new(Mesh::new(context, &mesh), PhysicalMaterial::new_opaque(context, &material)),
+            tile,
+            y,
+        }
+    }
+
+    fn follow(&mut self, pos: Vec3) {
+        let step = 2.0 * self.tile;
+        let snap = |v: f32| (v / step).round() * step;
+        self.gm
+            .set_transformation(Mat4::from_translation(vec3(snap(pos.x), self.y, snap(pos.z))));
+    }
+}
+
+/// Starts play mode for a model: loads the clips it needs from its animation list.
+fn start_demo(
+    context: &Context,
+    arc: &mut archive::Archive,
+    list: &[(String, String)],
+    skel: Option<&skeleton::Skeleton>,
+    model: &model::Model,
+) -> (demo::Demo, DemoFloor) {
+    let picks = demo::pick(list);
+    let clips: [Option<Clip>; demo::ROLES] = std::array::from_fn(|r| {
+        let (label, path) = &list[picks[r]?];
+        anim::load(arc, path, label).ok().map(|a| Clip::new(a, skel))
+    });
+    let labels = std::array::from_fn(|r| {
+        clips[r]
+            .as_ref()
+            .and(picks[r])
+            .map(|i| list[i].0.clone())
+    });
+    let height = model.max[1] - model.min[1];
+    let radius = model_radius(model);
+    (
+        demo::Demo::new(clips, labels, skel, height, radius),
+        DemoFloor::new(context, radius * 0.5, model.min[1]),
+    )
+}
+
+/// The keys play mode listens to.
+const DEMO_KEYS: [Key; 9] = [
+    Key::W,
+    Key::A,
+    Key::S,
+    Key::D,
+    Key::ArrowUp,
+    Key::ArrowDown,
+    Key::ArrowLeft,
+    Key::ArrowRight,
+    Key::Space,
+];
+
 fn frame_camera(camera: &mut Camera, control: &mut OrbitControl, model: &model::Model) {
     let (min, max) = (Vec3::from(model.min), Vec3::from(model.max));
     let center = (min + max) * 0.5;
@@ -516,6 +701,24 @@ fn main() -> Result<()> {
         vec3(0.8, -0.4, 0.6),
     );
     let rim = DirectionalLight::new(&context, 0.5, Srgba::WHITE, vec3(0.0, -0.3, 1.0));
+    // Lit: a warm sun high up that casts the shadows, and a cool sky that fills the shade. The sky reaches the
+    // model's shaded side and the shadow on the floor alike, so the two match (a side light would brighten only
+    // the model). The sun is kept moderate so white surfaces do not burn out. A faint upward bounce, as off the
+    // ground, lifts only the undersides; the floor faces away from it.
+    let sky = AmbientLight::new(&context, 0.45, Srgba::new(210, 222, 255, 255));
+    let mut sun = DirectionalLight::new(
+        &context,
+        1.4,
+        Srgba::new(255, 246, 232, 255),
+        vec3(-0.45, -1.0, -0.55),
+    );
+    let bounce = DirectionalLight::new(
+        &context,
+        0.15,
+        Srgba::new(235, 230, 220, 255),
+        vec3(0.0, 1.0, 0.0),
+    );
+    let mut lighting = if args.iter().any(|a| a == "--lit") { Lighting::Lit } else { Lighting::Unlit };
 
     let mut search = String::new();
     let mut selected: Option<usize> = None;
@@ -538,16 +741,33 @@ fn main() -> Result<()> {
     let mut skel_dirty = false;
     let mut selected_bone: Option<usize> = None;
 
-    // Animation: the model's list (label, path), the loaded one, and for each bone the track that drives it.
+    // Animation: the model's list (label, path), the selected entry and the clip loaded from it.
     let mut anim_list: Vec<(String, String)> = Vec::new();
-    let mut anim: Option<anim::Animation> = None;
+    let mut anim: Option<Clip> = None;
     let mut anim_index: Option<usize> = None;
     let mut anim_request: Option<Option<usize>> = None;
     let mut anim_error: Option<String> = None;
-    let mut track_of_bone: Vec<Option<usize>> = Vec::new();
-    let mut anim_frame = 0.0f32;
+    // Blending: a second clip mixed over the first with `blend_weight`, its clock either following the first
+    // clip's phase (`blend_sync`) or running on its own.
+    let mut blend: Option<Clip> = None;
+    let mut blend_index: Option<usize> = None;
+    let mut blend_request: Option<Option<usize>> = None;
+    let mut blend_error: Option<String> = None;
+    let mut blend_weight = 0.5f32;
+    let mut blend_sync = true;
+    // Crossfade: on a switch of either clip, the last pose shown is held and faded out over `crossfade` seconds.
+    let mut crossfade = 0.25f32;
+    let mut fade: Option<(Vec<skeleton::Local>, f32)> = None;
+    let mut last_pose: Option<Vec<skeleton::Local>> = None;
     let mut playing = true;
     let mut speed = 1.0f32;
+    // Play mode (F7): the controller, its ground, and the keyboard state it reads.
+    let mut demo: Option<demo::Demo> = None;
+    let mut demo_floor: Option<DemoFloor> = None;
+    let mut demo_toggle = false;
+    let mut keys_held: std::collections::HashSet<Key> = Default::default();
+    let mut shift = false;
+    let mut jump_queued = false;
     let mut loop_anim = true;
     let start_anim = args
         .iter()
@@ -569,6 +789,10 @@ fn main() -> Result<()> {
                     skel = None;
                     skel_gm = None;
                     anim = None;
+                    blend = None;
+                    fade = None;
+                    last_pose = None;
+                    demo = None;
                     anim_list.clear();
                     selected = None;
                     error = None;
@@ -637,6 +861,16 @@ fn main() -> Result<()> {
                         anim = None;
                         anim_index = None;
                         anim_error = None;
+                        blend = None;
+                        blend_index = None;
+                        blend_error = None;
+                        fade = None;
+                        last_pose = None;
+                        if demo.is_some() {
+                            let (d, f) = start_demo(&context, arc, &anim_list, skel.as_ref(), &m);
+                            demo = Some(d);
+                            demo_floor = Some(f);
+                        }
                         // --anim <part of a name> picks the first match once, for the start model
                         if let Some(want) = &start_anim {
                             anim_request = anim_list.iter().position(|(l, _)| l.contains(want.as_str())).map(Some);
@@ -650,6 +884,7 @@ fn main() -> Result<()> {
                     current = None;
                     skel = None;
                     skel_gm = None;
+                    demo = None;
                     error = Some(format!("{e:#}"));
                 }
             }
@@ -662,67 +897,151 @@ fn main() -> Result<()> {
         }
 
         // Switch animation if the panel asked for it last frame.
+        // A switch of either clip fades out of the pose shown last frame (none when the model stood still).
+        let held_pose = |last: &Option<Vec<skeleton::Local>>| last.clone().filter(|_| crossfade > 0.0).map(|p| (p, 0.0));
         if let Some(req) = anim_request.take() {
+            fade = held_pose(&last_pose);
             anim_index = req;
-            anim_frame = 0.0;
             anim_error = None;
             anim = None;
-            track_of_bone.clear();
             match req.and_then(|i| anim_list.get(i)) {
                 Some((label, path)) => match anim::load(arc, path, label) {
                     Ok(a) => {
-                        if let Some(s) = &skel {
-                            track_of_bone = s
-                                .bones
-                                .iter()
-                                .map(|b| a.tracks.iter().position(|t| t.name == b.name))
-                                .collect();
-                        }
-                        anim = Some(a);
+                        anim = Some(Clip::new(a, skel.as_ref()));
                         playing = true;
                     }
                     Err(e) => anim_error = Some(format!("{e:#}")),
                 },
                 // back to the still model: rebuild the meshes in their bind pose
-                None => rebuild = true,
+                None => {
+                    rebuild = true;
+                    blend = None;
+                    blend_index = None;
+                    fade = None;
+                }
+            }
+            if let Some(b) = blend.as_mut().filter(|_| !blend_sync) {
+                b.frame = 0.0;
             }
             skel_dirty = true;
         }
-
-        // Advance time and pose the skeleton.
-        if let (Some(a), true) = (&anim, playing) {
-            let last = (a.frames.max(2) - 1) as f32;
-            anim_frame += frame_input.elapsed_time as f32 / 1000.0 * a.fps as f32 * speed;
-            if anim_frame > last {
-                if loop_anim {
-                    anim_frame %= last;
-                } else {
-                    anim_frame = last;
-                    playing = false;
+        if let Some(req) = blend_request.take() {
+            fade = held_pose(&last_pose);
+            blend_index = req;
+            blend_error = None;
+            blend = None;
+            if let Some((label, path)) = req.and_then(|i| anim_list.get(i)) {
+                match anim::load(arc, path, label) {
+                    Ok(a) => blend = Some(Clip::new(a, skel.as_ref())),
+                    Err(e) => blend_error = Some(format!("{e:#}")),
                 }
             }
         }
-        let posed: Option<Vec<Mat4>> = match (&skel, &anim) {
-            (Some(s), Some(a)) => Some(s.posed_world(|i| {
-                let t = track_of_bone.get(i).copied().flatten()?;
-                let smp = a.tracks[t].sample(anim_frame);
-                Some(skeleton::LocalOverride {
-                    scale: smp.scale,
-                    rotation: smp.rotation,
-                    translation: smp.translation,
-                })
-            })),
-            _ => None,
+
+        // Enter or leave play mode if F7 (or the panel) asked for it last frame.
+        if std::mem::take(&mut demo_toggle) {
+            if demo.take().is_some() {
+                keys_held.clear();
+                if let Some(c) = current.as_mut() {
+                    for gm in c.meshes.iter_mut() {
+                        gm.set_transformation(Mat4::identity());
+                    }
+                    frame_camera(&mut camera, &mut control, &c.model);
+                }
+                // without an animation the meshes go back to the bind pose
+                rebuild |= anim.is_none();
+                fade = None;
+                last_pose = None;
+                skel_dirty = true;
+            } else if let Some(c) = &current {
+                let (d, f) = start_demo(&context, arc, &anim_list, skel.as_ref(), &c.model);
+                demo = Some(d);
+                demo_floor = Some(f);
+                jump_queued = false;
+            }
+        }
+
+        // Advance time and pose the skeleton.
+        let seconds = frame_input.elapsed_time as f32 / 1000.0;
+        if let (Some(a), true) = (anim.as_mut(), playing) {
+            if !a.advance(seconds * speed, loop_anim) {
+                playing = false;
+            }
+            if let Some(b) = blend.as_mut().filter(|_| !blend_sync) {
+                b.advance(seconds * speed, loop_anim);
+            }
+        }
+        if let (Some(a), Some(b), true) = (&anim, blend.as_mut(), blend_sync) {
+            // the same point of the cycle, so two gaits of different lengths stay in step
+            b.frame = a.phase() * b.last();
+        }
+        if let Some((_, t)) = fade.as_mut() {
+            *t += seconds;
+            if *t >= crossfade {
+                fade = None;
+            }
+        }
+        let posed: Option<Vec<Mat4>> = if let Some(d) = demo.as_mut() {
+            let held = |keys: &[Key]| keys.iter().any(|k| keys_held.contains(k)) as i32 as f32;
+            let input = demo::Input {
+                forward: held(&[Key::W, Key::ArrowUp]) - held(&[Key::S, Key::ArrowDown]),
+                right: held(&[Key::D, Key::ArrowRight]) - held(&[Key::A, Key::ArrowLeft]),
+                run: shift,
+                jump: std::mem::take(&mut jump_queued),
+            };
+            let before = d.pos;
+            let pose = d.update(input, seconds, camera.view_direction(), skel.as_ref(), crossfade);
+            // the camera follows along the ground (not up and down, so jumps show against the view)
+            let step = vec3(d.pos.x - before.x, 0.0, d.pos.z - before.z);
+            camera.translate(step);
+            control.target += step;
+            if let Some(f) = demo_floor.as_mut() {
+                f.follow(d.pos);
+            }
+            match (&skel, pose) {
+                (Some(s), Some(p)) => Some(s.posed_world(&p)),
+                _ => None,
+            }
+        } else {
+            match (&skel, &anim) {
+            (Some(s), Some(a)) => {
+                let mut pose = a.locals(s);
+                if let Some(b) = blend.as_ref().filter(|_| blend_weight > 0.0) {
+                    mix_pose(&mut pose, &b.locals(s), blend_weight);
+                }
+                if let Some((from, t)) = &fade {
+                    // eased in and out, so the hand-over has no jolt at either end
+                    let x = (t / crossfade).clamp(0.0, 1.0);
+                    let mut held = from.clone();
+                    mix_pose(&mut held, &pose, x * x * (3.0 - 2.0 * x));
+                    pose = held;
+                }
+                let world = s.posed_world(&pose);
+                last_pose = Some(pose);
+                Some(world)
+            }
+            _ => {
+                last_pose = None;
+                None
+            }
+        }
         };
         if let (Some(s), Some(world), Some(c)) = (&skel, &posed, current.as_mut()) {
             apply_skin(c, &s.skin_matrices(world));
+        }
+        // In play mode the whole model stands where the character is.
+        let model_transform = demo.as_ref().map_or(Mat4::identity(), |d| d.transform());
+        if let (Some(_), Some(c)) = (&demo, current.as_mut()) {
+            for gm in c.meshes.iter_mut() {
+                gm.set_transformation(model_transform);
+            }
         }
         if skel_dirty || (posed.is_some() && show_skeleton) {
             skel_dirty = false;
             skel_gm = match (&skel, &current) {
                 (Some(s), Some(c)) => {
                     let positions: Vec<Vec3> = match &posed {
-                        Some(w) => w.iter().map(|m| m.w.truncate()).collect(),
+                        Some(w) => w.iter().map(|m| (model_transform * m.w).truncate()).collect(),
                         None => (0..s.bones.len()).map(|i| s.position(i, bind_pose)).collect(),
                     };
                     let size = model_radius(&c.model) * 0.012;
@@ -779,6 +1098,12 @@ fn main() -> Result<()> {
                         rebuild = true;
                     }
                     ui.horizontal(|ui| {
+                        ui.radio_value(&mut lighting, Lighting::Unlit, "Unlit")
+                            .on_hover_text("Soft light from all sides");
+                        ui.radio_value(&mut lighting, Lighting::Lit, "Lit")
+                            .on_hover_text("One sun with shadows on the floor");
+                    });
+                    ui.horizontal(|ui| {
                         ui.checkbox(&mut show_mesh, "Mesh");
                         ui.checkbox(&mut show_floor, "Floor");
                     });
@@ -815,8 +1140,45 @@ fn main() -> Result<()> {
                     }
 
                     ui.separator();
+                    ui.heading("Play mode");
+                    if ui
+                        .button(if demo.is_some() { "Leave play mode (F7)" } else { "Enter play mode (F7)" })
+                        .on_hover_text("Walk the model around to see how its animations hand over to each other")
+                        .clicked()
+                    {
+                        demo_toggle = true;
+                    }
+                    if let Some(d) = &demo {
+                        ui.small("WASD / arrows: move, relative to the camera · Shift: run · Space: jump · F7 / Esc: leave");
+                        ui.label(format!("{:?} · speed {:.2}", d.state, d.speed));
+                        ui.small(format!(
+                            "walk {:.2}, run {:.2} units/s ({})",
+                            d.walk_speed,
+                            d.run_speed,
+                            if d.measured { "from the clips' root motion" } else { "guessed from the model size" }
+                        ));
+                        ui.small("Ground blend:");
+                        for (i, name) in ["Idle", "Walk", "Run"].iter().enumerate() {
+                            ui.add(
+                                egui::ProgressBar::new(d.weights[i])
+                                    .desired_height(14.0)
+                                    .text(format!("{name} {:.0}%", d.weights[i] * 100.0)),
+                            );
+                        }
+                        ui.add(egui::Slider::new(&mut crossfade, 0.0..=1.0).text("crossfade (s)"))
+                            .on_hover_text("Fade time between states; one-shot clips get at most half their length");
+                        ui.collapsing("Clips used", |ui| {
+                            for (r, (role, _, _)) in demo::ROLE_INFO.iter().enumerate() {
+                                ui.small(format!("{role}: {}", d.labels[r].as_deref().unwrap_or("not in this model")));
+                            }
+                        });
+                    }
+
+                    ui.separator();
                     ui.heading("Animation");
-                    if anim_list.is_empty() {
+                    if demo.is_some() {
+                        ui.small("Controlled by play mode.");
+                    } else if anim_list.is_empty() {
                         ui.small("This model lists no animations.");
                     } else {
                         let current_label = anim_index
@@ -838,23 +1200,29 @@ fn main() -> Result<()> {
                                 }
                             });
                         ui.small(format!("{} animations", anim_list.len()));
-                        if let Some(a) = &anim {
+                        ui.add(egui::Slider::new(&mut crossfade, 0.0..=1.0).text("crossfade (s)"))
+                            .on_hover_text("Time to ease from the current pose into a newly picked animation");
+                        if let Some(c) = &mut anim {
                             ui.horizontal(|ui| {
                                 if ui.button(if playing { "Pause" } else { "Play" }).clicked() {
                                     playing = !playing;
                                 }
                                 if ui.button("Restart").clicked() {
-                                    anim_frame = 0.0;
+                                    c.frame = 0.0;
+                                    if let Some(b) = &mut blend {
+                                        b.frame = 0.0;
+                                    }
                                     playing = true;
                                 }
                                 ui.checkbox(&mut loop_anim, "Loop");
                             });
-                            let last = (a.frames.max(2) - 1) as f32;
-                            if ui.add(egui::Slider::new(&mut anim_frame, 0.0..=last).text("frame")).dragged() {
+                            let last = c.last();
+                            if ui.add(egui::Slider::new(&mut c.frame, 0.0..=last).text("frame")).dragged() {
                                 playing = false;
                             }
                             ui.add(egui::Slider::new(&mut speed, 0.1..=2.0).text("speed"));
-                            let driven = track_of_bone.iter().filter(|t| t.is_some()).count();
+                            let a = &c.anim;
+                            let driven = c.track_of_bone.iter().filter(|t| t.is_some()).count();
                             ui.small(format!(
                                 "{} frames at {} fps ({:.2} s){} · {} tracks, {} drive bones",
                                 a.frames,
@@ -868,12 +1236,50 @@ fn main() -> Result<()> {
                         if let Some(e) = &anim_error {
                             ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
                         }
+                        if anim.is_some() {
+                            ui.add_space(6.0);
+                            ui.label("Blend with");
+                            let blend_label = blend_index
+                                .and_then(|i| anim_list.get(i))
+                                .map(|(l, _)| l.as_str())
+                                .unwrap_or("none");
+                            egui::ComboBox::from_id_salt("blend")
+                                .selected_text(blend_label)
+                                .width(ui.available_width() - 8.0)
+                                .height(400.0)
+                                .show_ui(ui, |ui| {
+                                    if ui.selectable_label(blend_index.is_none(), "none").clicked() {
+                                        blend_request = Some(None);
+                                    }
+                                    for (i, (label, _)) in anim_list.iter().enumerate() {
+                                        if ui.selectable_label(blend_index == Some(i), label).clicked() {
+                                            blend_request = Some(Some(i));
+                                        }
+                                    }
+                                });
+                            if let Some(b) = &blend {
+                                ui.add(egui::Slider::new(&mut blend_weight, 0.0..=1.0).text("weight"))
+                                    .on_hover_text("0 shows only the first animation, 1 only this one");
+                                ui.checkbox(&mut blend_sync, "Sync to first animation").on_hover_text(
+                                    "Keeps both at the same point of their cycle, stretching this one to the first \
+                                     one's length; when off, it plays at its own frame rate",
+                                );
+                                let driven = b.track_of_bone.iter().filter(|t| t.is_some()).count();
+                                ui.small(format!(
+                                    "{} frames at {} fps · {} drive bones",
+                                    b.anim.frames, b.anim.fps, driven
+                                ));
+                            }
+                            if let Some(e) = &blend_error {
+                                ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
+                            }
+                        }
                     }
                     if let Some(e) = &error {
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
                     }
                     ui.separator();
-                    ui.small("Left drag: orbit · Right drag: pan · Wheel: zoom");
+                    ui.small("Left drag: orbit · Right drag: pan · Wheel: zoom · F7: play mode");
                     ui.separator();
                     ui.small(format!("RomFS: {romfs_shown}"));
                     if ui.small_button("Change RomFS folder…").clicked() {
@@ -980,6 +1386,41 @@ fn main() -> Result<()> {
             },
         );
 
+        // Keyboard: F7 toggles play mode; in it, the movement keys are held or released. Keys typed into a text
+        // field are already marked handled by the GUI. Releases always count, so no key stays stuck.
+        for e in frame_input.events.iter_mut() {
+            match e {
+                Event::KeyPress {
+                    kind,
+                    modifiers,
+                    handled,
+                } => {
+                    shift = modifiers.shift;
+                    if *handled {
+                        continue;
+                    }
+                    match *kind {
+                        Key::F7 => demo_toggle = true,
+                        Key::Escape if demo.is_some() => demo_toggle = true,
+                        k if demo.is_some() && DEMO_KEYS.contains(&k) => {
+                            if k == Key::Space && !keys_held.contains(&k) {
+                                jump_queued = true;
+                            }
+                            keys_held.insert(k);
+                        }
+                        _ => continue,
+                    }
+                    *handled = true;
+                }
+                Event::KeyRelease { kind, modifiers, .. } => {
+                    shift = modifiers.shift;
+                    keys_held.remove(kind);
+                }
+                Event::ModifiersChange { modifiers } => shift = modifiers.shift,
+                _ => {}
+            }
+        }
+
         // The 3D view takes the space between the two panels.
         let px = (panel_width * frame_input.device_pixel_ratio) as u32;
         let rx = (right_width * frame_input.device_pixel_ratio) as u32;
@@ -995,9 +1436,26 @@ fn main() -> Result<()> {
         let screen = frame_input.screen();
         screen.clear(ClearState::color_and_depth(0.13, 0.14, 0.17, 1.0, 1.0));
         if let Some(c) = &current {
-            let floor = show_floor.then_some(&c.floor);
+            let floor = show_floor.then_some(match (&demo, &demo_floor) {
+                (Some(_), Some(f)) => &f.gm,
+                _ => &c.floor,
+            });
+            if lighting == Lighting::Lit {
+                // redone every frame, as the pose changes; only the model casts, so the map covers just it
+                if show_mesh {
+                    sun.generate_shadow_map(SHADOW_MAP_SIZE, &c.meshes).ok();
+                } else {
+                    sun.clear_shadow_map();
+                }
+            }
+            let unlit: [&dyn Light; 4] = [&ambient, &key, &fill, &rim];
+            let lit: [&dyn Light; 3] = [&sky, &sun, &bounce];
+            let lights: &[&dyn Light] = match lighting {
+                Lighting::Unlit => &unlit,
+                Lighting::Lit => &lit,
+            };
             let meshes = c.meshes.iter().filter(|_| show_mesh);
-            screen.render(&camera, meshes.chain(floor), &[&ambient, &key, &fill, &rim]);
+            screen.render(&camera, meshes.chain(floor), lights);
         }
         // Drawn after the mesh so that, in x-ray mode, it shows through it.
         if let (true, Some((bones, joints))) = (show_skeleton, &skel_gm) {
