@@ -1,0 +1,32 @@
+# Build output
+/target/
+
+# Game dumps and anything extracted from them: never commit these.
+romfs/
+exefs/
+arc/
+dump/
+game/
+*.trpfd
+*.trpfs
+*.trpak
+*.trmdl
+*.trmsh
+*.trmbf
+*.trmtr
+*.trmmt
+*.trskl
+*.tranm
+*.tracn
+*.tracr
+*.bntx
+*.bfbs
+*.nsp
+*.nsz
+*.xci
+*.xcz
+*.nca
+*.nso
+*.keys
+romfs.bin
+index.json
