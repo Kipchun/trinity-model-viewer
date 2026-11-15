@@ -32,32 +32,36 @@ fn dump(t: &Table, depth: usize, max_depth: usize) {
         let Some(a) = t.field(i) else { continue };
         let raw = u32_at(t.buf, a).unwrap_or(0);
         let mut line = format!("{pad}[{i}] u32={raw} f32={:.4}", f32::from_bits(raw));
-        if let Ok(Some(s)) = t.string(i) {
-            if !s.is_empty() && s.len() < 100 && s.chars().all(|c| c.is_ascii_graphic()) {
-                line += &format!(" str={s:?}");
-            }
+        if let Ok(Some(s)) = t.string(i)
+            && !s.is_empty()
+            && s.len() < 100
+            && s.chars().all(|c| c.is_ascii_graphic())
+        {
+            line += &format!(" str={s:?}");
         }
-        if let Ok((_, n)) = t.vector(i) {
-            if n < 100000 {
-                line += &format!(" vec_len={n}");
-            }
+        if let Ok((_, n)) = t.vector(i)
+            && n < 100000
+        {
+            line += &format!(" vec_len={n}");
         }
         println!("{line}");
         if depth / 2 < max_depth {
-            if let Ok(v) = t.tables(i) {
-                if !v.is_empty() && v.len() < 200 && v[0].slot_count() < 24 {
-                    for (k, e) in v.iter().enumerate().take(if depth == 0 { 3 } else { 40 }) {
-                        println!("{pad}  [{i}][{k}]:");
-                        dump(e, depth + 2, max_depth);
-                    }
-                    continue;
+            if let Ok(v) = t.tables(i)
+                && !v.is_empty()
+                && v.len() < 200
+                && v[0].slot_count() < 24
+            {
+                for (k, e) in v.iter().enumerate().take(if depth == 0 { 3 } else { 40 }) {
+                    println!("{pad}  [{i}][{k}]:");
+                    dump(e, depth + 2, max_depth);
                 }
+                continue;
             }
-            if let Ok(Some(sub)) = t.table(i) {
-                if sub.slot_count() < 24 {
-                    println!("{pad}  (table)");
-                    dump(&sub, depth + 2, max_depth);
-                }
+            if let Ok(Some(sub)) = t.table(i)
+                && sub.slot_count() < 24
+            {
+                println!("{pad}  (table)");
+                dump(&sub, depth + 2, max_depth);
             }
         }
     }
@@ -386,16 +390,13 @@ pub fn quat_test(ar: &mut archive::Archive) -> anyhow::Result<()> {
                         score[vi].2 += 1;
                     }
                 }
-                if vi == 0 {
-                    if let Some(tr) = s.translation {
-                        let rest = three_d::Vec3::new(
-                            b.translation[0],
-                            b.translation[1],
-                            b.translation[2],
-                        );
-                        tdist += (tr - rest).magnitude() as f64;
-                        tn += 1;
-                    }
+                if vi == 0
+                    && let Some(tr) = s.translation
+                {
+                    let rest =
+                        three_d::Vec3::new(b.translation[0], b.translation[1], b.translation[2]);
+                    tdist += (tr - rest).magnitude() as f64;
+                    tn += 1;
                 }
             }
         }
@@ -520,11 +521,11 @@ pub fn quat_layouts(ar: &mut archive::Archive) -> anyhow::Result<()> {
                         }
                         let mut v = [0.0f32; 4];
                         let mut kk = 0;
-                        for i in 0..4 {
+                        for (i, slot) in v.iter_mut().enumerate() {
                             if i == idx {
-                                v[i] = big
+                                *slot = big
                             } else {
-                                v[i] = q[kk];
+                                *slot = q[kk];
                                 kk += 1
                             }
                         }
@@ -548,7 +549,7 @@ pub fn quat_layouts(ar: &mut archive::Archive) -> anyhow::Result<()> {
             }
         }
     }
-    results.sort_by(|a, b| b.0.cmp(&a.0));
+    results.sort_by_key(|r| std::cmp::Reverse(r.0));
     for (g, d) in results.iter().take(6) {
         println!("{g:5} / {}  {d}", samples.len());
     }

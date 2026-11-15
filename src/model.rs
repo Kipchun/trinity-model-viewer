@@ -143,10 +143,10 @@ pub fn load(ar: &mut Archive, path: &str, lod: usize) -> Result<Model> {
     let mut materials = HashMap::new();
     for mtr in mdl.strings(3)? {
         // A missing or unreadable material file only costs the textures, not the model.
-        if let Ok(buf) = ar.read(&resolve(dir, &mtr)) {
-            if let Ok(m) = parse_materials(&buf) {
-                materials.extend(m);
-            }
+        if let Ok(buf) = ar.read(&resolve(dir, &mtr))
+            && let Ok(m) = parse_materials(&buf)
+        {
+            materials.extend(m);
         }
     }
     let skeleton_file = mdl
@@ -275,11 +275,15 @@ fn load_shape(shape: &Table, buffer: &Table) -> Result<Vec<SubMesh>> {
     let all: Vec<u32> = match shape.u32(2, 0) {
         0 => ib.iter().map(|b| *b as u32).collect(),
         1 => ib
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]) as u32)
             .collect(),
         2 => ib
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect(),
         t => bail!("index type {t} not handled"),

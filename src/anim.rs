@@ -270,21 +270,23 @@ pub fn list(ar: &mut Archive, model_path: &str) -> Vec<(String, String)> {
         // FlatBuffers strings: u32 length, bytes, NUL. Checked at every byte offset: the list is small, and
         // stepping by the alignment loses step after a match.
         let n = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]) as usize;
-        if (7..200).contains(&n) && i + 4 + n < buf.len() && buf[i + 4 + n] == 0 {
-            if let Ok(s) = std::str::from_utf8(&buf[i + 4..i + 4 + n]) {
-                if s.ends_with(".tranm") && s.is_ascii() {
-                    let path = crate::model::resolve(dir, s);
-                    if !out.iter().any(|(_, p)| *p == path) && ar.contains(&path) {
-                        let label = s
-                            .trim_end_matches(".tranm")
-                            .trim_start_matches(stem)
-                            .trim_start_matches('_');
-                        out.push((label.to_string(), path));
-                    }
-                    i += 4 + n;
-                    continue;
-                }
+        if (7..200).contains(&n)
+            && i + 4 + n < buf.len()
+            && buf[i + 4 + n] == 0
+            && let Ok(s) = std::str::from_utf8(&buf[i + 4..i + 4 + n])
+            && s.ends_with(".tranm")
+            && s.is_ascii()
+        {
+            let path = crate::model::resolve(dir, s);
+            if !out.iter().any(|(_, p)| *p == path) && ar.contains(&path) {
+                let label = s
+                    .trim_end_matches(".tranm")
+                    .trim_start_matches(stem)
+                    .trim_start_matches('_');
+                out.push((label.to_string(), path));
             }
+            i += 4 + n;
+            continue;
         }
         i += 1;
     }

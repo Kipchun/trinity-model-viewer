@@ -51,7 +51,7 @@ type with the probe), `find-assets` (list and search the archive's pack names).
   failures) before relying on them, and write the result into the doc comment (e.g. "958 of the 976 Pokémon").
 - Errors use `anyhow`; parsing is bounds-checked and never panics on bad data. A file that fails to load becomes
   a warning in the UI, not a crash.
-- Rust edition 2024. Run `cargo check --release` and `cargo clippy --release` before calling work done; run
+- Rust edition 2024. Before calling work done, pass what CI (`.github/workflows/ci.yml`) runs: `cargo fmt --all -- --check` and `cargo clippy --locked --all-targets --all-features -- -D warnings`; run
   `--check` (headless load of every model) after touching any loader.
 - Plain, direct wording in docs and UI text; the README is written for users who own the game.
 

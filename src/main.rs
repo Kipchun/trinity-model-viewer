@@ -146,7 +146,9 @@ fn skin_part(part: &SkinPart, mats: &[Mat4]) -> Skinned {
     let mut nrm = part.normals.as_ref().map(|_| Vec::with_capacity(n));
     for v in 0..n {
         let m = part.matrix(v, mats);
-        pos.push(m.map_or(part.positions[v], |m| (m * part.positions[v].extend(1.0)).truncate()));
+        pos.push(m.map_or(part.positions[v], |m| {
+            (m * part.positions[v].extend(1.0)).truncate()
+        }));
         if let (Some(o), Some(ns)) = (nrm.as_mut(), &part.normals) {
             o.push(m.map_or(ns[v], |m| (m * ns[v].extend(0.0)).truncate().normalize()));
         }
@@ -161,7 +163,10 @@ fn skin_tangents(part: &SkinPart, mats: &[Mat4]) -> Option<Vec<Vec4>> {
         ts.iter()
             .enumerate()
             .map(|(v, t)| match part.matrix(v, mats) {
-                Some(m) => (m * t.truncate().extend(0.0)).truncate().normalize().extend(t.w),
+                Some(m) => (m * t.truncate().extend(0.0))
+                    .truncate()
+                    .normalize()
+                    .extend(t.w),
                 None => *t,
             })
             .collect(),
@@ -186,19 +191,17 @@ fn apply_skin(loaded: &mut Loaded, mats: &[Mat4]) {
         if mesh.set_positions_partially(0, pos).is_err() {
             mesh.positions_mut().fill(pos);
         }
-        if let Some(n) = nrm.as_ref() {
-            if mesh.set_normals_partially(0, n).is_err() {
-                if let Some(buf) = mesh.normals_mut().as_mut() {
-                    buf.fill(n);
-                }
-            }
+        if let Some(n) = nrm.as_ref()
+            && mesh.set_normals_partially(0, n).is_err()
+            && let Some(buf) = mesh.normals_mut().as_mut()
+        {
+            buf.fill(n);
         }
-        if let Some(t) = tan.as_ref() {
-            if mesh.set_tangents_partially(0, t).is_err() {
-                if let Some(buf) = mesh.tangents_mut().as_mut() {
-                    buf.fill(t);
-                }
-            }
+        if let Some(t) = tan.as_ref()
+            && mesh.set_tangents_partially(0, t).is_err()
+            && let Some(buf) = mesh.tangents_mut().as_mut()
+        {
+            buf.fill(t);
         }
     }
 }
@@ -536,7 +539,13 @@ impl DemoFloor {
         const N: u32 = 64; // texture size: one checker period
         let (a, b) = ([74u8, 78, 88, 255], [58u8, 62, 70, 255]);
         let data = (0..N * N)
-            .map(|i| if (i % N < N / 2) == (i / N < N / 2) { a } else { b })
+            .map(|i| {
+                if (i % N < N / 2) == (i / N < N / 2) {
+                    a
+                } else {
+                    b
+                }
+            })
             .collect();
         let periods = 60.0; // from the centre to each edge
         let h = periods * 2.0 * tile;
@@ -569,7 +578,10 @@ impl DemoFloor {
             ..Default::default()
         };
         DemoFloor {
-            gm: Gm::new(Mesh::new(context, &mesh), PhysicalMaterial::new_opaque(context, &material)),
+            gm: Gm::new(
+                Mesh::new(context, &mesh),
+                PhysicalMaterial::new_opaque(context, &material),
+            ),
             tile,
             y,
         }
@@ -578,8 +590,11 @@ impl DemoFloor {
     fn follow(&mut self, pos: Vec3) {
         let step = 2.0 * self.tile;
         let snap = |v: f32| (v / step).round() * step;
-        self.gm
-            .set_transformation(Mat4::from_translation(vec3(snap(pos.x), self.y, snap(pos.z))));
+        self.gm.set_transformation(Mat4::from_translation(vec3(
+            snap(pos.x),
+            self.y,
+            snap(pos.z),
+        )));
     }
 }
 
@@ -594,14 +609,12 @@ fn start_demo(
     let picks = demo::pick(list);
     let clips: [Option<Clip>; demo::ROLES] = std::array::from_fn(|r| {
         let (label, path) = &list[picks[r]?];
-        anim::load(arc, path, label).ok().map(|a| Clip::new(a, skel))
+        anim::load(arc, path, label)
+            .ok()
+            .map(|a| Clip::new(a, skel))
     });
-    let labels = std::array::from_fn(|r| {
-        clips[r]
-            .as_ref()
-            .and(picks[r])
-            .map(|i| list[i].0.clone())
-    });
+    let labels =
+        std::array::from_fn(|r| clips[r].as_ref().and(picks[r]).map(|i| list[i].0.clone()));
     let height = model.max[1] - model.min[1];
     let radius = model_radius(model);
     (
@@ -718,7 +731,11 @@ fn main() -> Result<()> {
         Srgba::new(235, 230, 220, 255),
         vec3(0.0, 1.0, 0.0),
     );
-    let mut lighting = if args.iter().any(|a| a == "--lit") { Lighting::Lit } else { Lighting::Unlit };
+    let mut lighting = if args.iter().any(|a| a == "--lit") {
+        Lighting::Lit
+    } else {
+        Lighting::Unlit
+    };
 
     let mut search = String::new();
     let mut selected: Option<usize> = None;

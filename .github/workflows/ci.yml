@@ -54,10 +54,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             pkg-config libgtk-3-dev libx11-dev libxkbcommon-dev \
             libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+      # No doc-test step: doc tests only run for library targets and this package has binaries only.
       - name: Run tests without game assets
         run: cargo test --locked --all-targets --all-features
-      - name: Run documentation tests
-        run: cargo test --locked --doc
 
   build:
     name: Build (${{ matrix.os }}, ${{ matrix.profile }})

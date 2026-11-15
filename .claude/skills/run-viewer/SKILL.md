@@ -10,8 +10,14 @@ From the repository root.
 1. Compile and lint:
 
    ```
+   cargo fmt --all
+   cargo clippy --locked --all-targets --all-features -- -D warnings
+   ```
+
+   These match the CI workflow; any warning fails CI.
+
+   ```
    cargo check --release
-   cargo clippy --release
    ```
 
 2. Headless load of every model (no window; prints failures and a summary). Run it after any loader change; it

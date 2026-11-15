@@ -154,9 +154,7 @@ impl Demo {
         };
         let (walk, run) = (measure(WALK), measure(RUN));
         let measured = walk.is_some() || run.is_some();
-        let walk_speed = walk
-            .or(run.map(|r| r * 0.4))
-            .unwrap_or(radius * 1.2);
+        let walk_speed = walk.or(run.map(|r| r * 0.4)).unwrap_or(radius * 1.2);
         let run_speed = run.unwrap_or(walk_speed * 2.5).max(walk_speed * 1.1);
         // jump to half the model's height, reaching the top in 0.38 s
         let (h, t) = (height.max(0.05) * 0.5, 0.38);
@@ -218,11 +216,18 @@ impl Demo {
     ) -> Option<Vec<Local>> {
         let dt = dt.min(0.1);
         self.state_time += dt;
-        let airborne = matches!(self.state, State::Rising | State::FallStart | State::Falling);
+        let airborne = matches!(
+            self.state,
+            State::Rising | State::FallStart | State::Falling
+        );
 
         // Steering: turn towards the pressed direction, speed up or slow down towards walk or run speed.
         let fwd = vec3(camera_forward.x, 0.0, camera_forward.z);
-        let fwd = if fwd.magnitude() > 1e-4 { fwd.normalize() } else { vec3(0.0, 0.0, -1.0) };
+        let fwd = if fwd.magnitude() > 1e-4 {
+            fwd.normalize()
+        } else {
+            vec3(0.0, 0.0, -1.0)
+        };
         let right = vec3(-fwd.z, 0.0, fwd.x);
         let dir = fwd * input.forward + right * input.right;
         let control = match self.state {
@@ -241,7 +246,11 @@ impl Demo {
             }
             let turn = 3.0 * std::f32::consts::PI * control * dt;
             self.yaw += d.clamp(-turn, turn);
-            if input.run { self.run_speed } else { self.walk_speed }
+            if input.run {
+                self.run_speed
+            } else {
+                self.walk_speed
+            }
         } else {
             0.0
         };
