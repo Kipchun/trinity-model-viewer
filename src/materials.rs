@@ -28,6 +28,19 @@ pub struct Baked {
     /// A flat colour (linear RGBA) for materials without a colour texture.
     pub color: Option<[f32; 4]>,
     pub alpha: AlphaMode,
+    /// Pokémon eyes ("Eye", "EyeClearCoat" shaders): their glossy coat and highlight.
+    pub eye: Option<Eye>,
+}
+
+/// What the eye shaders add over the layered colour (`probe --eyes`, 1981 materials): a clear coat with its own
+/// normal map (NormalMap1, the bulge of the eye; every EyeClearCoat eye has one) and roughness (RoughnessClearCoat,
+/// mostly 0.2), and with EnableHighlight "True" (1460) a mirror-like highlight: RoughnessHighlight (0.1 .. 0.6),
+/// MetallicHighlight (mostly 1). The colour textures hold no highlight: it is the lights' reflection.
+pub struct Eye {
+    pub coat_normal: Option<Image>,
+    /// Strength 0 when the material has no highlight.
+    pub highlight: f32,
+    pub highlight_roughness: f32,
 }
 
 /// How a material's alpha is used.
@@ -136,6 +149,26 @@ pub fn bake(ar: &mut Archive, model: &Model) -> (HashMap<String, Baked>, Vec<Str
                 None => AlphaMode::Opaque,
             },
         };
+        let eye = mat.shader.starts_with("Eye").then(|| {
+            let f = |k: &str, d: f32| mat.floats.get(k).copied().unwrap_or(d);
+            let coat_normal = (mat.switches.get("EnableNormalMap1").map(String::as_str)
+                != Some("False"))
+            .then(|| mat.texture("NormalMap1"))
+            .flatten()
+            .and_then(|t| get(ar, t, &mut warnings))
+            .map(rebuild_normal);
+            let highlight =
+                if mat.switches.get("EnableHighlight").map(String::as_str) == Some("True") {
+                    f("MetallicHighlight", 1.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+            Eye {
+                coat_normal,
+                highlight,
+                highlight_roughness: f("RoughnessHighlight", 0.2).clamp(0.05, 1.0),
+            }
+        });
         out.insert(
             name.clone(),
             Baked {
@@ -143,6 +176,7 @@ pub fn bake(ar: &mut Archive, model: &Model) -> (HashMap<String, Baked>, Vec<Str
                 normal,
                 color,
                 alpha,
+                eye,
             },
         );
     }

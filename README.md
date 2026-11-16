@@ -99,8 +99,8 @@ For example: `cargo run --release -- --model pm0006_00_00 --anim walk01 --skelet
 
 The source files start with the field layouts they read, as checked against the game's files.
 
-Not yet supported: emission, roughness and special effect shaders (Pokémon eyes lack the shine their clear-coat
-shader adds); face and material animations (blinking, eye textures); alternate colour sets (shiny) and the player's
+Not yet supported: emission, roughness and special effect shaders (Pokémon eye highlights are an approximation of the
+game's); face and material animations (blinking, eye textures); alternate colour sets (shiny) and the player's
 clothing colour variants; everything placed on the map; scenes and interiors.
 
 ## Development

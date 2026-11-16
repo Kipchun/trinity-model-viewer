@@ -17,6 +17,7 @@ mod anim;
 mod archive;
 mod config;
 mod demo;
+mod eye;
 mod fb;
 mod materials;
 mod model;
@@ -468,7 +469,7 @@ struct Loaded {
     model: model::Model,
     baked: HashMap<String, materials::Baked>,
     warnings: Vec<String>,
-    meshes: Vec<Gm<Mesh, PhysicalMaterial>>,
+    meshes: Vec<Gm<Mesh, eye::ModelMaterial>>,
     /// Bind-pose vertex data of each mesh in `meshes`, for skinning; `None` for parts without skin weights.
     skin: Vec<Option<SkinPart>>,
     floor: Gm<Mesh, PhysicalMaterial>,
@@ -590,7 +591,7 @@ fn build(
     normal_maps: bool,
 ) -> Loaded {
     // One GPU material per Trinity material, shared by every part that uses it (textures are uploaded once).
-    let mut gpu_materials: HashMap<String, PhysicalMaterial> = HashMap::new();
+    let mut gpu_materials: HashMap<String, eye::ModelMaterial> = HashMap::new();
     let mut meshes = Vec::new();
     let mut skin = Vec::new();
     for s in &model.submeshes {
@@ -626,12 +627,35 @@ fn build(
         }
         let use_normal_map =
             normal_maps && bk.is_some_and(|b| b.normal.is_some()) && cpu.uvs.is_some();
-        if use_normal_map {
+        // Pokémon eyes: the eye material, which needs UVs, tangents (for its coat normals) and a colour texture
+        let eye_bake = bk
+            .filter(|b| b.albedo.is_some() && cpu.uvs.is_some())
+            .and_then(|b| b.eye.as_ref().map(|e| (b, e)));
+        if use_normal_map || eye_bake.is_some() {
             cpu.compute_tangents();
         }
         let material = gpu_materials
             .entry(s.material.clone())
             .or_insert_with(|| {
+                if let Some((b, e)) = eye_bake
+                    && let Some(a) = &b.albedo
+                {
+                    let tex = |i: &texture::Image| {
+                        Texture2DRef::from_cpu_texture(context, &cpu_texture(i))
+                    };
+                    // colour in linear space, as three-d's physical material uploads it
+                    let mut linear = cpu_texture(a);
+                    linear.data.to_linear_srgb();
+                    return eye::ModelMaterial::Eye(eye::EyeMaterial {
+                        albedo: Texture2DRef::from_cpu_texture(context, &linear),
+                        normal: b.normal.as_ref().filter(|_| normal_maps).map(tex),
+                        coat: e.coat_normal.as_ref().filter(|_| normal_maps).map(tex),
+                        // as the physical material before, so the eye's colours look the same
+                        roughness: 0.7,
+                        highlight: e.highlight,
+                        highlight_roughness: e.highlight_roughness,
+                    });
+                }
                 let grey = Srgba::new(205, 205, 210, 255);
                 let mut m = CpuMaterial {
                     roughness: 0.7,
@@ -665,7 +689,7 @@ fn build(
                     (Shading::MaterialColours, _) => m.albedo = material_color(&s.material),
                     _ => {}
                 }
-                transparent_material(context, &m, alpha)
+                eye::ModelMaterial::Physical(Box::new(transparent_material(context, &m, alpha)))
             })
             .clone();
         meshes.push(Gm::new(Mesh::new(context, &cpu), material));
@@ -2077,8 +2101,8 @@ fn main() -> Result<()> {
                 Lighting::Unlit => &unlit,
                 Lighting::Lit => &lit,
             };
-            let meshes = c.meshes.iter().filter(|_| show_mesh);
-            screen.render(&camera, meshes.chain(floor), lights);
+            let meshes = c.meshes.iter().filter(|_| show_mesh).map(|m| m as &dyn Object);
+            screen.render(&camera, meshes.chain(floor.map(|f| f as &dyn Object)), lights);
         }
         // Drawn after the mesh so that, in x-ray mode, it shows through it.
         if let (true, false, Some((bones, joints))) = (show_skeleton, world_shown, &skel_gm) {

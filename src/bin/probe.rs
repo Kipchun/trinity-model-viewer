@@ -17,6 +17,8 @@
 //!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
 //!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
 //!   cargo run --release --bin probe -- --characters            list the character models discovery finds
+//!   cargo run --release --bin probe -- --material <trmdl> <name part>  every field of the matching materials
+//!   cargo run --release --bin probe -- --eyes                  Eye / EyeClearCoat materials: highlight switches and values
 //!   cargo run --release --bin probe -- --transparency          shader, render type and alpha switches of every material
 //!   cargo run --release --bin probe -- --trainer-anims         every human model: own clip list, named and best-fit body type
 #[path = "../anim.rs"]
@@ -352,6 +354,38 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--player" {
         return player_check(&mut ar);
+    }
+    if args[0] == "--material" && args.len() >= 3 {
+        let m = model::load(&mut ar, &args[1], 0)?;
+        let mut names: Vec<&String> = m
+            .materials
+            .keys()
+            .filter(|n| n.contains(args[2].as_str()))
+            .collect();
+        names.sort();
+        for n in names {
+            let mat = &m.materials[n];
+            println!(
+                "== {n}: shader {:?}, render type {:?}",
+                mat.shader, mat.render_type
+            );
+            println!("  textures {:?}", mat.textures);
+            let mut sw: Vec<_> = mat.switches.iter().collect();
+            sw.sort();
+            println!("  switches {sw:?}");
+            let mut f: Vec<_> = mat.floats.iter().collect();
+            f.sort_by(|a, b| a.0.cmp(b.0));
+            println!("  floats {f:?}");
+            let mut p: Vec<_> = mat.params.iter().collect();
+            p.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in p {
+                println!("  {k} {v:?}");
+            }
+        }
+        return Ok(());
+    }
+    if args[0] == "--eyes" {
+        return eyes(&mut ar);
     }
     if args[0] == "--transparency" {
         return transparency(&mut ar);
@@ -1383,6 +1417,71 @@ fn transparency(ar: &mut archive::Archive) -> anyhow::Result<()> {
     );
     for ((sh, has, en), (n, ex)) in &tinted {
         println!("{sh:>14} map={has:<5} enable={en:<5} {n:>5}  e.g. {ex:?}");
+    }
+    Ok(())
+}
+
+/// Every Pokémon eye material ("Eye" and "EyeClearCoat" shaders): how the highlight is set up.
+fn eyes(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let mut keys: BTreeMap<String, usize> = BTreeMap::new();
+    let mut values: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut total = 0;
+    for p in ar.pokemon_models() {
+        let Ok(m) = model::load(ar, &p, 0) else {
+            continue;
+        };
+        for mat in m.materials.values().filter(|m| m.shader.starts_with("Eye")) {
+            total += 1;
+            let key = format!(
+                "{} highlight={} normal1={} map1={}",
+                mat.shader,
+                mat.switches
+                    .get("EnableHighlight")
+                    .map_or("-", String::as_str),
+                mat.texture("NormalMap1").is_some(),
+                mat.switches
+                    .get("EnableNormalMap1")
+                    .map_or("-", String::as_str),
+            );
+            *keys.entry(key).or_default() += 1;
+            let mut note = |k: &str, v: String| {
+                *values
+                    .entry(k.to_string())
+                    .or_default()
+                    .entry(v)
+                    .or_default() += 1;
+            };
+            for f in [
+                "RoughnessHighlight",
+                "MetallicHighlight",
+                "EmissionIntensityLayer5",
+                "RoughnessClearCoat",
+            ] {
+                note(f, mat.floats.get(f).map_or("-".into(), |v| format!("{v}")));
+            }
+            for c in ["EmissionColorLayer5", "BaseColorClearCoat"] {
+                note(
+                    c,
+                    mat.params
+                        .get(c)
+                        .map_or("-".into(), |v| format!("{:.2?}", v)),
+                );
+            }
+            let mut sw: Vec<_> = mat.switches.keys().cloned().collect();
+            sw.sort();
+            note("switch set", sw.join(","));
+        }
+    }
+    println!("{total} eye materials");
+    for (k, n) in keys {
+        println!("{n:>6}  {k}");
+    }
+    for (k, vs) in values {
+        let mut v: Vec<_> = vs.into_iter().collect();
+        v.sort_by_key(|e| std::cmp::Reverse(e.1));
+        v.truncate(8);
+        println!("{k}: {v:?}");
     }
     Ok(())
 }

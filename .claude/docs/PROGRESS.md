@@ -99,8 +99,12 @@ Update this file at the end of each work session: move items between sections, a
   hair colour for the `Hair` shader (208 materials).
 - Seen in the window (`--look head`, new option): tr0040 eyes now show iris and highlight (the opaque lens hid
   them), tr0080's glasses are see-through, Pikachu unchanged.
-- Known: Pokémon `EyeClearCoat` eyes have no highlight in their data; the game's shader adds it (clear coat,
-  `NormalMap1`). Needs a custom eye shader.
+- Pokémon eye highlights (same day): `src/eye.rs` + `shaders/eye.frag`, used for "Eye"/"EyeClearCoat" materials
+  (`probe --eyes`: 1981, 1460 with `EnableHighlight`). The textures hold no highlight: NormalMap is the iris dish,
+  NormalMap1 the cornea bulge. The shader draws the old lit colour plus a white spot reflected off NormalMap1 from
+  a light fixed to the camera (up-left, front); size from RoughnessHighlight, strength MetallicHighlight.
+  **Approximation**: the game's formula is unknown. Seen: Pikachu now has its highlight; Charizard's eyes unchanged.
+  Probe: `--material <trmdl> <name>` prints a material's every field.
 
 ## In flight
 
