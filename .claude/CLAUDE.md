@@ -40,6 +40,9 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 | `src/skeleton.rs` | `.trskl`, rest pose vs. bind pose |
 | `src/anim.rs` | `.tranm` tracks, `_base.tracr` animation lists |
 | `src/demo.rs` | play mode (F7): locomotion blend space and jump states |
+| `src/player.rs` | player character: part catalogue by slot, assembly of parts on the base skeleton |
+| `src/terrain.rs` | overworld terrain tiles: `.trtrr` and the height file in its pack |
+| `src/world.rs` | World tab: terrain meshes per tile, splat `TerrainMaterial` (shader `src/shaders/terrain.frag`), minimap panel, right-drag pan |
 | `src/config.rs` | remembers the RomFS path (`%APPDATA%\trinity-model-viewer\romfs_path.txt`) |
 | `src/bin/probe.rs` | dev tool: slot dumps of any archive file and whole-dump checks |
 

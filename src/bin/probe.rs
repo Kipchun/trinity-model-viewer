@@ -9,6 +9,14 @@
 //!   cargo run --release --bin probe -- --anims                 parse every animation of every 10th model
 //!   cargo run --release --bin probe -- --quat-layouts          packed quaternion layouts vs. rest poses
 //!   cargo run --release --bin probe -- --skin                  skin weights and joint indices, all models
+//!   cargo run --release --bin probe -- --load <trmdl path>...  load models as the viewer does, print what failed
+//!   cargo run --release --bin probe -- --pack <path> [names]  every file in that path's pack (hash, size, head)
+//!   cargo run --release --bin probe -- --save <path|#hash> <out>  raw file bytes, for study (keep out of the repo)
+//!   cargo run --release --bin probe -- --terrain              load every overworld tile's heights, check seams
+//!   cargo run --release --bin probe -- --texture <bntx> <layer> <out>  decoded RGBA8 of one layer (raw, for study)
+//!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
+//!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
+//!   cargo run --release --bin probe -- --characters            list the character models discovery finds
 #[path = "../anim.rs"]
 mod anim;
 #[path = "../archive.rs"]
@@ -17,10 +25,16 @@ mod archive;
 mod config;
 #[path = "../fb.rs"]
 mod fb;
+#[path = "../materials.rs"]
+mod materials;
 #[path = "../model.rs"]
 mod model;
+#[path = "../player.rs"]
+mod player;
 #[path = "../skeleton.rs"]
 mod skeleton;
+#[path = "../terrain.rs"]
+mod terrain;
 #[path = "../texture.rs"]
 mod texture;
 
@@ -45,6 +59,17 @@ fn dump(t: &Table, depth: usize, max_depth: usize) {
             line += &format!(" vec_len={n}");
         }
         println!("{line}");
+        // a vector of strings (e.g. file lists): print its entries
+        if let Ok(v) = t.strings(i)
+            && !v.is_empty()
+            && v.iter()
+                .all(|s| !s.is_empty() && s.len() < 200 && s.chars().all(|c| c.is_ascii_graphic()))
+        {
+            for (k, s) in v.iter().enumerate().take(40) {
+                println!("{pad}  [{i}][{k}] str={s:?}");
+            }
+            continue;
+        }
         if depth / 2 < max_depth {
             if let Ok(v) = t.tables(i)
                 && !v.is_empty()
@@ -64,6 +89,161 @@ fn dump(t: &Table, depth: usize, max_depth: usize) {
                 dump(&sub, depth + 2, max_depth);
             }
         }
+    }
+}
+
+/// Puts every player part on the base skeleton, one at a time, and the default outfit as a whole. Reports load
+/// failures, attach warnings, and skinned vertices that point at a joint without a bone (they would not move).
+fn player_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    let parts = player::catalog(ar);
+    let mut by_slot = std::collections::BTreeMap::new();
+    for p in &parts {
+        *by_slot
+            .entry(format!("{} (p{})", p.slot.label(), p.body))
+            .or_insert(0) += 1;
+    }
+    println!("{} parts: {by_slot:?}", parts.len());
+    let check = |ar: &mut archive::Archive, paths: &[&str]| -> (usize, usize, Vec<String>) {
+        match player::assemble(ar, paths, 0) {
+            Ok(a) => {
+                let (mut bad, mut total) = (0, 0);
+                for s in &a.model.submeshes {
+                    let (Some(j), Some(w)) = (&s.joints, &s.weights) else {
+                        continue;
+                    };
+                    for (j, w) in j.iter().zip(w) {
+                        total += 1;
+                        if (0..4)
+                            .any(|k| w[k] > 0.0 && a.skeleton.joint_bone(j[k] as usize).is_none())
+                        {
+                            bad += 1;
+                        }
+                    }
+                }
+                let anims = anim::list_at(ar, player::ANIM_LIST, player::ANIM_STEM).len();
+                let mut w = a.warnings;
+                if anims == 0 {
+                    w.push("no animations".into());
+                }
+                (bad, total, w)
+            }
+            Err(e) => (0, 0, vec![format!("FAIL {e:#}")]),
+        }
+    };
+    let default = player::Outfit::default_for(&parts);
+    let paths = default.paths(&parts);
+    let (bad, total, w) = check(ar, &paths);
+    println!(
+        "default outfit {paths:?}: {bad} of {total} vertices on a joint without a bone, warnings {w:?}"
+    );
+    let mut failed = 0;
+    for p in &parts {
+        let (bad, total, w) = check(ar, &[p.path.as_str()]);
+        if bad > 0 || !w.is_empty() {
+            failed += 1;
+            println!(
+                "{}: {bad} of {total} vertices unmoved, warnings {w:?}",
+                p.path
+            );
+        }
+    }
+    println!("{} of {} parts clean", parts.len() - failed, parts.len());
+    let list = anim::list_at(ar, player::ANIM_LIST, player::ANIM_STEM);
+    // do the clips' bone names match the assembled skeleton?
+    if let Ok(a) = player::assemble(ar, &paths, 0) {
+        for (label, path) in list.iter().filter(|(l, _)| {
+            ["defaultwait01_loop", "walk01_loop", "run01_loop"]
+                .iter()
+                .any(|w| l.ends_with(w))
+        }) {
+            match anim::load(ar, path, label) {
+                Ok(c) => {
+                    let matched = c
+                        .tracks
+                        .iter()
+                        .filter(|t| a.skeleton.bones.iter().any(|b| b.name == t.name))
+                        .count();
+                    println!(
+                        "clip {label}: {} frames, {matched} of {} tracks on a bone",
+                        c.frames,
+                        c.tracks.len()
+                    );
+                }
+                Err(e) => println!("clip {label}: FAIL {e:#}"),
+            }
+        }
+    }
+    println!(
+        "{} animations, first: {:?}",
+        list.len(),
+        list.iter()
+            .take(8)
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>()
+    );
+    Ok(())
+}
+
+/// Loads one model the way the viewer does (mesh, skeleton, baked materials) and prints counts and every warning.
+fn load_report(ar: &mut archive::Archive, path: &str) {
+    println!("== {path}");
+    let m = match model::load(ar, path, 0) {
+        Ok(m) => m,
+        Err(e) => {
+            println!("  FAIL model: {e:#}");
+            return;
+        }
+    };
+    let skinned = m.submeshes.iter().filter(|s| s.joints.is_some()).count();
+    println!(
+        "  {} mesh files, {} parts ({skinned} skinned), {} triangles, {} materials, size {:.3} x {:.3} x {:.3}",
+        m.mesh_files,
+        m.submeshes.len(),
+        m.triangle_count(),
+        m.materials.len(),
+        m.max[0] - m.min[0],
+        m.max[1] - m.min[1],
+        m.max[2] - m.min[2],
+    );
+    match &m.skeleton_file {
+        Some(f) => match skeleton::load(ar, &m.dir, f) {
+            Ok(s) => {
+                let joints = s.inverse_bind.iter().filter(|j| j.is_some()).count();
+                let max_joint = m
+                    .submeshes
+                    .iter()
+                    .filter_map(|s| s.joints.as_ref())
+                    .flatten()
+                    .flatten()
+                    .max()
+                    .copied();
+                println!(
+                    "  skeleton {f}: {} bones, {joints} joints, highest joint index used {max_joint:?}",
+                    s.bones.len()
+                );
+            }
+            Err(e) => println!("  FAIL skeleton {f}: {e:#}"),
+        },
+        None => println!("  no skeleton"),
+    }
+    let (baked, warnings) = materials::bake(ar, &m);
+    let textured = baked.values().filter(|b| b.albedo.is_some()).count();
+    println!(
+        "  materials: {textured} of {} with a colour texture",
+        baked.len()
+    );
+    for w in &warnings {
+        println!("  warn {w}");
+    }
+    for (name, mat) in &m.materials {
+        println!(
+            "  material {name}: render {:?}, roles {:?}",
+            mat.render_type,
+            mat.textures
+                .iter()
+                .map(|(r, _)| r.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -103,6 +283,47 @@ fn main() -> anyhow::Result<()> {
         has(&ar, &args[1..]);
         return Ok(());
     }
+    if args[0] == "--pack" {
+        return pack_list(&mut ar, &args[1], &args[2..]);
+    }
+    if args[0] == "--save" {
+        // raw bytes of a file (path or #hash) to a local file, for study outside the repo
+        let b = match args[1].strip_prefix("#") {
+            Some(h) => ar.read_hash(u64::from_str_radix(h, 16)?)?,
+            None => ar.read(&args[1])?,
+        };
+        std::fs::write(&args[2], &b)?;
+        println!("{} bytes", b.len());
+        return Ok(());
+    }
+    if args[0] == "--terrain" {
+        return terrain_check(&mut ar);
+    }
+    if args[0] == "--texture" {
+        // decoded RGBA8 of one array layer to a raw file (width, height as u32 first), for study outside the repo
+        let b = ar.read(&args[1])?;
+        let layer: u32 = args[2].parse()?;
+        let img = texture::decode_bntx_layer(&b, layer)?;
+        let mut out = Vec::with_capacity(8 + img.rgba.len() * 4);
+        out.extend(img.width.to_le_bytes());
+        out.extend(img.height.to_le_bytes());
+        out.extend(img.rgba.iter().flatten());
+        std::fs::write(&args[3], out)?;
+        println!(
+            "{}x{} {} ({} layers)",
+            img.width,
+            img.height,
+            img.format,
+            texture::layer_count(&b)?
+        );
+        return Ok(());
+    }
+    if args[0] == "--splat-seams" {
+        return splat_seams(&mut ar);
+    }
+    if args[0] == "--splat" {
+        return splat_check(&mut ar);
+    }
     if args[0] == "--packs" {
         packs(&ar, &args[1]);
         return Ok(());
@@ -113,7 +334,38 @@ fn main() -> anyhow::Result<()> {
     if args[0] == "--survey" {
         return survey(&mut ar);
     }
-    let b = ar.read(&args[0])?;
+    if args[0] == "--bones" {
+        // every bone of a .trskl: index, name, parent, joint index
+        let path = &args[1];
+        let s = skeleton::parse(&ar.read(path)?, path)?;
+        let joints = s.inverse_bind.len();
+        println!("{} bones, {joints} joint slots", s.bones.len());
+        for (i, b) in s.bones.iter().enumerate() {
+            let parent = b.parent.map(|p| s.bones[p].name.as_str()).unwrap_or("-");
+            println!("{i:4} {:32} parent {parent:32} joint {:?}", b.name, b.joint);
+        }
+        return Ok(());
+    }
+    if args[0] == "--player" {
+        return player_check(&mut ar);
+    }
+    if args[0] == "--characters" {
+        for p in ar.character_models() {
+            println!("{p}");
+        }
+        return Ok(());
+    }
+    if args[0] == "--load" {
+        for path in &args[1..] {
+            load_report(&mut ar, path);
+        }
+        return Ok(());
+    }
+    // a path, or "#<hex hash>" for a file whose name is not known yet (see --pack)
+    let b = match args[0].strip_prefix("#") {
+        Some(h) => ar.read_hash(u64::from_str_radix(h, 16)?)?,
+        None => ar.read(&args[0])?,
+    };
     println!("{} bytes, head {:02x?}", b.len(), &b[..16.min(b.len())]);
     if b.starts_with(b"BNTX") {
         for row in b[..0x40].chunks(16) {
@@ -323,6 +575,209 @@ pub fn packs(ar: &archive::Archive, pat: &str) {
     for n in ar.pack_names.iter().filter(|n| n.contains(pat)) {
         println!("{n}");
     }
+}
+
+/// Every file in the pack holding `path`: hash, size, first bytes, and the name if `path` or one of `names`
+/// (relative to `path`'s folder) hashes to it.
+pub fn pack_list(ar: &mut archive::Archive, path: &str, names: &[String]) -> anyhow::Result<()> {
+    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
+    let mut known: Vec<String> = vec![path.to_string()];
+    known.extend(names.iter().map(|n| format!("{dir}/{n}")));
+    let hashes = ar.pack_files(path)?;
+    println!("{} files", hashes.len());
+    for h in hashes {
+        let name = known
+            .iter()
+            .find(|k| archive::fnv1a64(k) == h)
+            .cloned()
+            .unwrap_or_default();
+        match ar.read_hash(h) {
+            Ok(b) => println!(
+                "{h:016x} {:>9} {:02x?} {name}",
+                b.len(),
+                &b[..b.len().min(16)]
+            ),
+            Err(e) => println!("{h:016x} error {e} {name}"),
+        }
+    }
+    Ok(())
+}
+
+/// Loads every grid tile's heightfield; checks sizes, origins against `x*500, -y*500-500`, and how well shared
+/// edges of neighbouring tiles agree with columns along x (as loaded) and with the grid transposed.
+pub fn terrain_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let mut tiles = HashMap::new();
+    for (x, y, path) in terrain::tiles(ar) {
+        match terrain::load_heights(ar, &path) {
+            Ok(t) => {
+                let (lo, hi) = t
+                    .heights
+                    .iter()
+                    .fold((f32::MAX, f32::MIN), |(a, b), h| (a.min(*h), b.max(*h)));
+                let holes = t.heights.iter().filter(|h| **h == 0.0).count();
+                let expect = [x as f32 * 500.0, 0.0, -(y as f32) * 500.0 - 500.0];
+                println!(
+                    "{x:02}_{y:02} {}x{} origin {:?}{} scale {:?} heights {lo:.1}..{hi:.1} holes {holes}",
+                    t.width,
+                    t.depth,
+                    t.origin,
+                    if t.origin == expect {
+                        ""
+                    } else {
+                        " (UNEXPECTED)"
+                    },
+                    t.scale,
+                );
+                tiles.insert((x, y), t);
+            }
+            Err(e) => println!("{x:02}_{y:02} FAILED {e:#}"),
+        }
+    }
+    // mean |difference| over samples where both sides are not holes
+    let edge = |a: &[f32], b: &[f32]| {
+        let (mut sum, mut n) = (0.0f64, 0);
+        for (p, q) in a.iter().zip(b) {
+            if *p != 0.0 && *q != 0.0 {
+                sum += (p - q).abs() as f64;
+                n += 1;
+            }
+        }
+        if n == 0 { None } else { Some(sum / n as f64) }
+    };
+    let col = |t: &terrain::HeightTile, c: usize| {
+        (0..t.depth).map(|r| t.height(c, r)).collect::<Vec<_>>()
+    };
+    let row = |t: &terrain::HeightTile, r: usize| {
+        (0..t.width).map(|c| t.height(c, r)).collect::<Vec<_>>()
+    };
+    let (mut as_loaded, mut transposed) = (Vec::new(), Vec::new());
+    for (&(x, y), a) in &tiles {
+        // x neighbour: a's last column meets b's first column
+        if let Some(b) = tiles.get(&(x + 1, y)) {
+            as_loaded.extend(edge(&col(a, a.width - 1), &col(b, 0)));
+            transposed.extend(edge(&row(a, a.depth - 1), &row(b, 0)));
+        }
+        // y + 1 is further towards -z: its last row meets a's first row
+        if let Some(b) = tiles.get(&(x, y + 1)) {
+            as_loaded.extend(edge(&row(b, b.depth - 1), &row(a, 0)));
+            transposed.extend(edge(&col(b, b.width - 1), &col(a, 0)));
+        }
+    }
+    let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+    println!(
+        "{} tiles loaded; seams: as loaded {:.3} m mean over {} edges, transposed {:.3} m over {}",
+        tiles.len(),
+        mean(&as_loaded),
+        as_loaded.len(),
+        mean(&transposed),
+        transposed.len()
+    );
+    Ok(())
+}
+
+/// For every tile: the splat names of its height file (slot 15) and the layer indices (R and G) its control map
+/// uses, with how many texels use each.
+pub fn splat_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    for (x, y, path) in terrain::tiles(ar) {
+        let header = archive::fnv1a64(&path);
+        let mut names = Vec::new();
+        for h in ar.pack_files(&path)? {
+            if h == header {
+                continue;
+            }
+            let Ok(b) = ar.read_hash(h) else { continue };
+            if terrain::parse_heights(&b).is_ok() {
+                names = fb::Table::root(&b, 0)?.strings(15)?;
+            }
+        }
+        let mut used = std::collections::BTreeMap::<u8, usize>::new();
+        match terrain::tile_material(ar, &path)
+            .and_then(|m| texture::decode_bntx(&ar.read(&m.splat_alpha)?))
+        {
+            Ok(img) => {
+                for p in &img.rgba {
+                    if p[2] > 0 {
+                        *used.entry(p[0]).or_default() += 1;
+                    }
+                    if p[3] > 0 {
+                        *used.entry(p[1]).or_default() += 1;
+                    }
+                }
+            }
+            Err(e) => println!("{x:02}_{y:02} material: {e:#}"),
+        }
+        let names: Vec<String> = names
+            .iter()
+            .map(|n| {
+                n.strip_prefix("splat")
+                    .unwrap_or(n)
+                    .chars()
+                    .take(3)
+                    .collect()
+            })
+            .collect();
+        println!("{x:02}_{y:02} names {names:?} used {used:?}");
+    }
+    Ok(())
+}
+
+/// Agreement of the dominant layer along each shared tile edge, for the control maps as loaded and for each
+/// row/column flipped, to check how a control map sits on its tile.
+pub fn splat_seams(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+    let mut maps: HashMap<(i32, i32), (f32, texture::Image)> = HashMap::new();
+    for (x, y, path) in terrain::tiles(ar) {
+        let Ok(h) = terrain::load_heights(ar, &path) else {
+            continue;
+        };
+        if let Ok(img) = terrain::tile_material(ar, &path)
+            .and_then(|m| texture::decode_bntx(&ar.read(&m.splat_alpha)?))
+        {
+            maps.insert((x, y), (h.origin[2], img));
+        }
+    }
+    let dom = |img: &texture::Image, c: usize, r: usize| {
+        let p = img.rgba[r * img.width as usize + c];
+        if p[2] >= p[3] { p[0] } else { p[1] }
+    };
+    // (name, flip columns, flip rows)
+    for (name, fc, fr) in [
+        ("as loaded", false, false),
+        ("columns flipped", true, false),
+        ("rows flipped", false, true),
+    ] {
+        let at = |img: &texture::Image, c: usize, r: usize| {
+            let n = img.width as usize - 1;
+            dom(img, if fc { n - c } else { c }, if fr { n - r } else { r })
+        };
+        let (mut same, mut total, mut same_z, mut total_z) = (0, 0, 0, 0);
+        for (&(x, y), (z, a)) in &maps {
+            let n = a.width as usize - 1;
+            if let Some((_, b)) = maps.get(&(x + 1, y)) {
+                for r in 0..=n {
+                    total += 1;
+                    same += (at(a, n, r) == at(b, 0, r)) as usize;
+                }
+            }
+            // the tile whose origin is 500 m further along -z: its last row meets this one's first row
+            let below = maps
+                .iter()
+                .find(|(k, (zb, _))| k.0 == x && (*zb - (z - 500.0)).abs() < 1.0);
+            if let Some((_, (_, b))) = below {
+                for c in 0..=n {
+                    total_z += 1;
+                    same_z += (at(b, c, n) == at(a, c, 0)) as usize;
+                }
+            }
+        }
+        println!(
+            "{name}: x edges {:.1}% same ({total}), z edges {:.1}% same ({total_z})",
+            100.0 * same as f64 / total.max(1) as f64,
+            100.0 * same_z as f64 / total_z.max(1) as f64
+        );
+    }
+    Ok(())
 }
 
 pub fn has(ar: &archive::Archive, paths: &[String]) {

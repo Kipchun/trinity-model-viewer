@@ -3,12 +3,16 @@
 A desktop viewer for the 3D models of games built on Game Freak's Trinity engine (developed against
 *Pokémon Scarlet & Violet*). It reads the game's packed archive directly and shows:
 
-- **Models**: every Pokémon model in the archive, with all its parts and detail levels (LODs)
+- **Models**: every Pokémon model in the archive, plus trainers, named characters and props (pick the list at the
+  top of the panel), with all their parts and detail levels (LODs)
 - **Textures**: colour and normal maps, including the layered tint colours the game uses for eyes, flames and bodies
 - **Skeletons**: the bone hierarchy, with bind and rest pose, drawn over or through the mesh
 - **Animations**: all of a model's animations (idle, walk, run, battle moves and more), with the mesh skinned to the bones;
   crossfades between animations and blends two at once
+- **Player character**: build the player from its parts (outfit, legwear, gloves, shoes, face, hair, headwear,
+  eyewear, bag) and see them animated together with the player's own animations
 - **Play mode** (F7): walk, run and jump the model around to see its animations hand over to each other
+- **World**: the overworld's terrain with its ground textures, the whole island at once or tile by tile
 
 **No game files are included.** You need your own dump of the game's RomFS, made from a copy you own.
 The viewer reads it in place and never changes it.
@@ -37,11 +41,22 @@ The viewer reads it in place and never changes it.
   crossfades from the current pose (the time is adjustable; 0 switches at once). **Blend with** mixes a second
   animation over the first with a weight slider; with **Sync** on, both stay at the same point of their cycle
   (useful for idle/walk/run mixes), otherwise the second plays at its own rate.
+- **Player** (the last tab above the list): pick one part per slot from the drop-downs, or step through them with
+  the arrow buttons; the character updates at once and keeps playing the current animation. **Outfit set** switches
+  between the two sets of outfits (`p1` and `p2`). **Random** dresses the player at random, **Default** goes back.
+  The outfit, legwear and gloves are also the body (bare arms, legs and hands are parts too), so leaving them out
+  leaves gaps.
 - **Play mode** (F7, or the button in the left panel): control the model like a game character. WASD or the arrow
   keys move it relative to the camera, Shift runs, Space jumps, F7 or Esc leaves. Idle, walk and run are blended
   by speed, with walk and run kept in step; the speeds come from the clips' own root motion, so the feet do not
   slide. A jump plays take-off, rising, fall and landing in turn, with the crossfade between each. The panel shows
   the state, speed and blend weights, and which clips the model provides.
+- **World** (the tab after Player): the overworld terrain, 10 x 10 tiles of 500 m, coloured by height. Tiles load
+  one by one when the tab opens. **Ground** switches between the game's ground textures (grass, rock, sand,
+  snow, paths, blended as the game's splat maps say) and colours by height. Click a tile in the minimap to hide or
+  show it; **Detail** sets how many height
+  samples are used (Full is about 0.98 m between samples and heavy for the whole map). Towns, Area Zero and the sea
+  are holes in the terrain: they have their own models, which are not placed yet.
 - **Right panel**: the model's files, parts and materials, and its skeleton as a tree; click a bone to highlight it
   and see its transform.
 - **Mouse**: left drag orbits, right drag pans, the wheel zooms.
@@ -52,10 +67,13 @@ Command-line options:
 | --- | --- |
 | `<folder>` | use this RomFS folder (and remember it) |
 | `--model pm0006_00_00` | start with this model |
+| `--player` | start with the player character |
+| `--world` | start in the World tab (overworld terrain) |
+| `--tiles 05_03,06_03` | start in the World tab showing only these terrain tiles |
 | `--anim walk01` | start the first animation whose name contains this text |
 | `--lit` | start in Lit mode (one sun with shadows) |
 | `--skeleton` | start with the skeleton shown |
-| `--check` | load every model once and report failures, without opening a window |
+| `--check` | load every model and terrain tile (with its ground textures) once and report failures, without opening a window |
 
 For example: `cargo run --release -- --model pm0006_00_00 --anim walk01 --skeleton`.
 
@@ -67,13 +85,14 @@ For example: `cargo run --release -- --model pm0006_00_00 --anim walk01 --skelet
 | `.trmdl`, `.trmsh`, `.trmbf` | model, mesh layout, vertex and index buffers |
 | `.trmtr` | materials: textures by role, layer colours, UV transforms |
 | `.bntx` | textures (BC1–BC7, ASTC; Tegra block-linear layout) |
-| `.trskl` | skeletons and inverse bind matrices |
+| `.trskl` | skeletons and inverse bind matrices; player parts' bones attached to the base skeleton |
 | `_base.tracr`, `.tranm` | a model's animation list and its skeletal animations |
+| `.trtrr` and its height file | overworld terrain tiles: heights and splat ground textures (grass and placed objects not yet) |
 
 The source files start with the field layouts they read, as checked against the game's files.
 
 Not yet supported: emission, roughness and transparency effects; face and material animations (blinking, eye
-textures); alternate colour sets (shiny); models other than Pokémon.
+textures); alternate colour sets (shiny) and the player's clothing colour variants; animations for trainers; terrain materials and everything placed on the map; scenes and interiors.
 
 ## Development
 

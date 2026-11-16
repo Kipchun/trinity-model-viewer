@@ -1,13 +1,19 @@
 //! Trinity skeletons (.trskl). Field slots, checked against the game's files:
-//!   trskl  { 1: [TransformNode], 2: [JointInfo] }
+//!   trskl  { 1: [TransformNode], 2: [JointInfo], 4: joint offset (u32; player parts only, see below) }
 //!   TransformNode { 0: name, 1: Transform {0: scale, 1: rotation (Euler, radians), 2: translation; each an inline
-//!                   xyz}, 4: parent index (absent = none), 5: joint index (absent = not a skinning joint) }
+//!                   xyz}, 4: parent index (absent = none), 5: joint index (absent = not a skinning joint),
+//!                   6: name of the bone it hangs from in another skeleton (player parts), 7: 1 when 6 is set }
 //!   JointInfo { 2: inverse bind matrix {0..3: columns as inline xyz: x axis, y axis, z axis, translation} }
 //! A bone's local matrix is T * Rz * Ry * Rx * S; its world matrix is the parent's world matrix times that. The
 //! inverse bind matrices confirm the order: world * inverse bind = identity for the joints of 958 of the 976 Pokémon.
 //! In the other 18 some limbs were skinned in a different pose than the stored rest pose, so two poses are kept:
 //! `world` (rest pose, from the transforms; animations start from it) and `bind` (from the inverse bind matrices;
 //! matches the mesh). A bone without a bind matrix follows its parent's bind pose with its own local transform.
+//!
+//! Player parts (chara/model_pc) carry small skeletons of their own bones only (hair strands, bag straps, eyes).
+//! Their root bones name a bone of the base skeleton (p0_base.trskl, 72 joints) in slot 6 ("head"), and slot 4 gives
+//! where their joints start in one joint list shared by the whole player: hair 72, face 92, bag 104. The parts'
+//! meshes use those shared joint numbers. `Skeleton::attach` builds that list.
 
 use crate::archive::Archive;
 use crate::fb::{Table, u32_at};
@@ -17,6 +23,8 @@ use three_d::{Mat4, Quat, Rotation3, SquareMatrix, Vec3, Vec4};
 pub struct Bone {
     pub name: String,
     pub parent: Option<usize>,
+    /// Bone of another skeleton this one hangs from (player parts; TransformNode slot 6).
+    pub attach: Option<String>,
     pub joint: Option<usize>,
     pub scale: [f32; 3],
     pub rotation: [f32; 3],
@@ -34,6 +42,8 @@ pub struct Skeleton {
     order: Vec<usize>,
     /// The bone each joint index belongs to.
     joint_bone: Vec<Option<usize>>,
+    /// Where this skeleton's joints start in the player's shared joint list (trskl slot 4; 0 when absent).
+    pub joint_offset: usize,
 }
 
 /// A bone's local transform: scale, rotation, translation (the matrix is T * R * S).
@@ -100,6 +110,11 @@ impl Skeleton {
                 _ => Mat4::identity(),
             })
             .collect()
+    }
+
+    /// The bone of joint `j`, if the joint exists and has one.
+    pub fn joint_bone(&self, j: usize) -> Option<usize> {
+        self.joint_bone.get(j).copied().flatten()
     }
 
     pub fn position(&self, i: usize, bind_pose: bool) -> Vec3 {
@@ -186,10 +201,12 @@ pub fn parse(buf: &[u8], file: &str) -> Result<Skeleton> {
             .map(|_| n.u32(5, 0) as i32)
             .filter(|j| *j >= 0)
             .map(|j| j as usize);
+        let attach = n.string(6)?.filter(|s| !s.is_empty());
         let id = Mat4::identity();
         bones.push(Bone {
             name,
             parent,
+            attach,
             joint,
             scale,
             rotation,
@@ -201,6 +218,112 @@ pub fn parse(buf: &[u8], file: &str) -> Result<Skeleton> {
     if bones.is_empty() {
         bail!("{file}: no bones");
     }
+    let mut inverse_bind = Vec::new();
+    for j in root.tables(2)? {
+        inverse_bind.push(match j.table(2)? {
+            Some(m) => {
+                let c = |i: usize, w: f32| -> Result<Vec4> {
+                    let v = vec3(&m, i, [0.0; 3])?;
+                    Ok(Vec4::new(v[0], v[1], v[2], w))
+                };
+                Some(Mat4::from_cols(
+                    c(0, 0.0)?,
+                    c(1, 0.0)?,
+                    c(2, 0.0)?,
+                    c(3, 1.0)?,
+                ))
+            }
+            None => None,
+        });
+    }
+    let joint_offset = root.field(4).map_or(0, |_| root.u32(4, 0) as usize);
+    Ok(finish(file, bones, inverse_bind, joint_offset))
+}
+
+impl Skeleton {
+    /// Adds a player part's skeleton to this (base) skeleton. Bones whose name is already here are the same bone;
+    /// the others are appended, under their parent in the part or else under the base bone they name (slot 6).
+    /// Part joint j becomes joint `part.joint_offset + j` of the shared list, which is what the part's meshes use.
+    /// Returns a warning for each joint that would overwrite one already in use.
+    pub fn attach(&mut self, part: &Skeleton) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut bones = std::mem::take(&mut self.bones);
+        let mut inverse_bind = std::mem::take(&mut self.inverse_bind);
+        let mut used: Vec<bool> = (0..inverse_bind.len())
+            .map(|j| self.joint_bone(j).is_some())
+            .collect();
+        // where each part bone ended up
+        let mut index = vec![usize::MAX; part.bones.len()];
+        for &i in &part.order {
+            let b = &part.bones[i];
+            if let Some(existing) = bones.iter().position(|x| x.name == b.name) {
+                index[i] = existing;
+                if let Some(j) = b.joint
+                    && bones[existing].joint != Some(part.joint_offset + j)
+                {
+                    warnings.push(format!(
+                        "{}: bone {} is already in the skeleton; its joint {} is not mapped",
+                        part.file,
+                        b.name,
+                        part.joint_offset + j
+                    ));
+                }
+                continue;
+            }
+            let parent = match b.parent.filter(|p| *p < part.bones.len()) {
+                Some(p) => Some(index[p]).filter(|&p| p != usize::MAX),
+                None => b
+                    .attach
+                    .as_ref()
+                    .and_then(|a| bones.iter().position(|x| &x.name == a)),
+            };
+            let joint = b.joint.map(|j| part.joint_offset + j);
+            let joint = joint.filter(|&j| {
+                let free = !used.get(j).copied().unwrap_or(false);
+                if !free {
+                    warnings.push(format!(
+                        "{}: bone {} would take joint {j}, which is in use",
+                        part.file, b.name
+                    ));
+                }
+                free
+            });
+            if let Some(j) = joint {
+                if inverse_bind.len() <= j {
+                    inverse_bind.resize(j + 1, None);
+                    used.resize(j + 1, false);
+                }
+                inverse_bind[j] = b
+                    .joint
+                    .and_then(|pj| part.inverse_bind.get(pj).copied().flatten());
+                used[j] = true;
+            }
+            index[i] = bones.len();
+            bones.push(Bone {
+                name: b.name.clone(),
+                parent,
+                attach: b.attach.clone(),
+                joint,
+                scale: b.scale,
+                rotation: b.rotation,
+                translation: b.translation,
+                world: Mat4::identity(),
+                bind: Mat4::identity(),
+            });
+        }
+        let file = std::mem::take(&mut self.file);
+        *self = finish(&file, bones, inverse_bind, self.joint_offset);
+        warnings
+    }
+}
+
+/// Orders the bones parents first and computes their rest (`world`) and bind poses and the joint-to-bone table.
+fn finish(
+    file: &str,
+    mut bones: Vec<Bone>,
+    inverse_bind: Vec<Option<Mat4>>,
+    joint_offset: usize,
+) -> Skeleton {
     // Parents come before children in the files seen so far, but resolve in any order to be safe.
     let mut done = vec![false; bones.len()];
     let mut order = Vec::with_capacity(bones.len());
@@ -228,24 +351,6 @@ pub fn parse(buf: &[u8], file: &str) -> Result<Skeleton> {
         }
     }
 
-    let mut inverse_bind = Vec::new();
-    for j in root.tables(2)? {
-        inverse_bind.push(match j.table(2)? {
-            Some(m) => {
-                let c = |i: usize, w: f32| -> Result<Vec4> {
-                    let v = vec3(&m, i, [0.0; 3])?;
-                    Ok(Vec4::new(v[0], v[1], v[2], w))
-                };
-                Some(Mat4::from_cols(
-                    c(0, 0.0)?,
-                    c(1, 0.0)?,
-                    c(2, 0.0)?,
-                    c(3, 1.0)?,
-                ))
-            }
-            None => None,
-        });
-    }
     for &i in &order {
         let ibm = bones[i]
             .joint
@@ -269,13 +374,14 @@ pub fn parse(buf: &[u8], file: &str) -> Result<Skeleton> {
             joint_bone[j] = Some(i);
         }
     }
-    Ok(Skeleton {
+    Skeleton {
         file: file.to_string(),
         bones,
         inverse_bind,
         order,
         joint_bone,
-    })
+        joint_offset,
+    }
 }
 
 /// The model's skeleton file (trmdl slot 2), if it has one.

@@ -1,15 +1,16 @@
-//! Trinity model viewer: browse the Pokémon models in a dumped RomFS and look at them in a simple 3D scene, with
-//! textures, skeletons and animations. No game data comes with it: the user picks their own RomFS dump.
+//! Trinity model viewer: browse the Pokémon, trainer and prop models in a dumped RomFS and look at them in a simple
+//! 3D scene, with textures, skeletons and animations. No game data comes with it: the user picks their own RomFS dump.
 //!
 //!   cargo run --release                 opens the viewer; asks for the RomFS folder the first time
 //!   cargo run --release -- <romfs dir>  uses that RomFS folder (and remembers it)
 //!   cargo run --release -- --check      loads every model once and prints failures, without a window
 //!   cargo run --release -- --model pm0006_00_00   starts with that model selected
+//!   cargo run --release -- --player               starts with the player character (mix and match its parts)
 //!   cargo run --release -- --skeleton             starts with the skeleton shown
 //!   cargo run --release -- --lit                  starts in Lit mode (one sun with shadows)
 //!   cargo run --release -- --anim walk01          starts the first animation whose name contains that text
 //!
-//! Mouse: left drag orbits, right drag pans, wheel zooms.
+//! Mouse: left drag orbits, right drag pans (`world::pan`), wheel zooms.
 //! F7: play mode (see demo.rs): WASD or arrows move, Shift runs, Space jumps; F7 or Esc leaves it.
 
 mod anim;
@@ -19,8 +20,11 @@ mod demo;
 mod fb;
 mod materials;
 mod model;
+mod player;
 mod skeleton;
+mod terrain;
 mod texture;
+mod world;
 
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -39,10 +43,244 @@ fn pick_romfs_folder() -> Option<PathBuf> {
         .pick_folder()
 }
 
-/// "pokemon/data/pm0025/pm0025_00_00/pm0025_00_00.trmdl" -> "pm0025_00_00"
+/// "pokemon/data/pm0025/pm0025_00_00/pm0025_00_00.trmdl" -> "pm0025_00_00";
+/// "chara/model_tr/tr0330_karate/tr0330_00.trmdl" -> "tr0330_karate/tr0330_00" (the folder carries the name).
 fn short_name(path: &str) -> &str {
-    let file = path.rsplit('/').next().unwrap_or(path);
-    file.strip_suffix(".trmdl").unwrap_or(file)
+    let path = path.strip_suffix(".trmdl").unwrap_or(path);
+    if let Some(rest) = path.strip_prefix("chara/") {
+        return rest.split_once('/').map_or(rest, |(_, r)| r);
+    }
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// The model lists in the left panel.
+#[derive(Clone, Copy, PartialEq)]
+enum Category {
+    Pokemon,
+    Trainers,
+    Props,
+    /// Not a list: the player character, assembled from the parts picked in the panel.
+    Player,
+    /// Not a list: the overworld terrain (see `world.rs`).
+    World,
+}
+
+impl Category {
+    const ALL: [Category; 5] = [
+        Category::Pokemon,
+        Category::Trainers,
+        Category::Props,
+        Category::Player,
+        Category::World,
+    ];
+
+    fn of(path: &str) -> Category {
+        if path.starts_with("chara/model_ob/") {
+            Category::Props
+        } else if path.starts_with("chara/") {
+            Category::Trainers
+        } else {
+            Category::Pokemon
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Category::Pokemon => "Pokémon",
+            Category::Trainers => "Trainers",
+            Category::Props => "Props",
+            Category::Player => "Player",
+            Category::World => "World",
+        }
+    }
+
+    fn search_hint(self) -> &'static str {
+        match self {
+            Category::Pokemon => "search, e.g. pm0025 or 0006",
+            Category::Trainers => "search, e.g. karate or tr0080",
+            Category::Props => "search, e.g. phone or ob0001",
+            Category::Player | Category::World => "",
+        }
+    }
+}
+
+/// A model ready to show, from the list or assembled from player parts. `skel` and `anims` are `None` when the
+/// current ones stay (a LOD change).
+struct Prepared {
+    model: model::Model,
+    skel: Option<Result<skeleton::Skeleton, String>>,
+    anims: Option<Vec<(String, String)>>,
+    baked: HashMap<String, materials::Baked>,
+    warnings: Vec<String>,
+}
+
+/// Loads a listed model; with `fresh`, also its skeleton and animation list.
+fn load_listed(
+    arc: &mut archive::Archive,
+    path: &str,
+    lod: usize,
+    fresh: bool,
+) -> Result<Prepared> {
+    let m = model::load(arc, path, lod)?;
+    let skel = fresh.then(|| match &m.skeleton_file {
+        Some(f) => skeleton::load(arc, &m.dir, f).map_err(|e| format!("{e:#}")),
+        None => Err("the model names no skeleton".into()),
+    });
+    let anims = fresh.then(|| anim::list(arc, &m.path));
+    let (baked, warnings) = materials::bake(arc, &m);
+    Ok(Prepared {
+        model: m,
+        skel,
+        anims,
+        baked,
+        warnings,
+    })
+}
+
+/// Assembles the player from the chosen parts, with its skeleton and animation list.
+fn load_player(
+    arc: &mut archive::Archive,
+    parts: &[player::Part],
+    outfit: &player::Outfit,
+    lod: usize,
+) -> Result<Prepared> {
+    let a = player::assemble(arc, &outfit.paths(parts), lod)?;
+    Ok(Prepared {
+        model: a.model,
+        skel: Some(Ok(a.skeleton)),
+        anims: Some(anim::list_at(arc, player::ANIM_LIST, player::ANIM_STEM)),
+        baked: a.baked,
+        warnings: a.warnings,
+    })
+}
+
+/// A small random number generator for "Random outfit" (xorshift, seeded from the clock).
+fn random_below(state: &mut u64, n: usize) -> usize {
+    if *state == 0 {
+        *state = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
+            | 1;
+    }
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    (*state % n.max(1) as u64) as usize
+}
+
+/// The player panel: outfit set, one drop-down per slot with previous / next buttons, Random and Default.
+/// Returns true when the choice changed.
+fn player_panel(
+    ui: &mut egui::Ui,
+    parts: &[player::Part],
+    outfit: &mut player::Outfit,
+    rng: &mut u64,
+) -> bool {
+    use player::Slot;
+    let before = outfit.clone();
+    let options = |slot: Slot, body: u8| -> Vec<usize> {
+        (0..parts.len())
+            .filter(|&i| parts[i].slot == slot && (parts[i].body == 0 || parts[i].body == body))
+            .collect()
+    };
+    ui.horizontal(|ui| {
+        ui.label("Outfit set");
+        let old = outfit.body;
+        ui.radio_value(&mut outfit.body, 1, "1")
+            .on_hover_text("Outfits made for body 1 (p1_ files)");
+        ui.radio_value(&mut outfit.body, 2, "2")
+            .on_hover_text("Outfits made for body 2 (p2_ files)");
+        if outfit.body != old {
+            // keep the same outfit from the other set when it has one
+            let label = outfit.get(Slot::Outfit).map(|i| parts[i].label.clone());
+            let list = options(Slot::Outfit, outfit.body);
+            let same = list
+                .iter()
+                .copied()
+                .find(|&i| Some(&parts[i].label) == label.as_ref());
+            outfit.set(Slot::Outfit, same.or(list.first().copied()));
+        }
+    });
+    egui::Grid::new("player_parts")
+        .num_columns(2)
+        .spacing([6.0, 4.0])
+        .show(ui, |ui| {
+            for slot in Slot::ALL {
+                let list = options(slot, outfit.body);
+                if list.is_empty() {
+                    continue;
+                }
+                ui.label(slot.label());
+                ui.horizontal(|ui| {
+                    let current = outfit.get(slot);
+                    // position in the list: None first, then the parts
+                    let pos = current
+                        .and_then(|c| list.iter().position(|&i| i == c))
+                        .map_or(0, |p| p + 1);
+                    let step = |d: isize| {
+                        let n = list.len() as isize + 1;
+                        let p = (pos as isize + d).rem_euclid(n) as usize;
+                        (p > 0).then(|| list[p - 1])
+                    };
+                    let mut v = current;
+                    if ui.small_button("◀").clicked() {
+                        v = step(-1);
+                    }
+                    let text = current.map_or("None", |i| parts[i].label.as_str());
+                    egui::ComboBox::from_id_salt(slot.label())
+                        .selected_text(text)
+                        .width(150.0)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut v, None, "None");
+                            for &i in &list {
+                                ui.selectable_value(&mut v, Some(i), &parts[i].label);
+                            }
+                        });
+                    if ui.small_button("▶").clicked() {
+                        v = step(1);
+                    }
+                    if v != current {
+                        outfit.set(slot, v);
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    ui.horizontal(|ui| {
+        if ui
+            .button("Random")
+            .on_hover_text(
+                "A random part in every slot that has one (headwear, eyewear, bag: sometimes none)",
+            )
+            .clicked()
+        {
+            outfit.body = 1 + random_below(rng, 2) as u8;
+            for slot in Slot::ALL {
+                let list = options(slot, outfit.body);
+                let optional = matches!(
+                    slot,
+                    Slot::Headwear | Slot::Eyewear | Slot::Bag | Slot::Accessory
+                );
+                let pick = if list.is_empty() || (optional && random_below(rng, 2) == 0) {
+                    None
+                } else {
+                    Some(list[random_below(rng, list.len())])
+                };
+                outfit.set(slot, pick);
+            }
+        }
+        if ui.button("Default").clicked() {
+            *outfit = player::Outfit::default_for(parts);
+        }
+    });
+    *outfit != before
+}
+
+/// Every model the viewer lists: Pokémon, then trainers and props.
+fn all_models(ar: &archive::Archive) -> Vec<String> {
+    let mut models = ar.pokemon_models();
+    models.extend(ar.character_models());
+    models
 }
 
 /// A stable, soft colour per material name.
@@ -66,7 +304,7 @@ fn material_color(name: &str) -> Srgba {
 }
 
 fn check(ar: &mut archive::Archive) {
-    let models = ar.pokemon_models();
+    let models = all_models(ar);
     let mut failed = 0;
     for m in &models {
         if let Err(e) = model::load(ar, m, 0) {
@@ -78,6 +316,31 @@ fn check(ar: &mut archive::Archive) {
         "{} models, {} loaded, {failed} failed",
         models.len(),
         models.len() - failed
+    );
+    let tiles = terrain::tiles(ar);
+    let mut failed = 0;
+    let mut layers_checked = false;
+    for (_, _, path) in &tiles {
+        // heights, then the splat material: the tile's control map and (once) the shared ground layers
+        let result = terrain::load_heights(ar, path).and_then(|_| {
+            let m = terrain::tile_material(ar, path)?;
+            texture::decode_bntx(&ar.read(&m.splat_alpha)?)?;
+            if !layers_checked {
+                let l = terrain::load_layers(ar, &m)?;
+                println!("{} ground texture layers", l.colors.len());
+                layers_checked = true;
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            failed += 1;
+            println!("FAIL {path}: {e:#}");
+        }
+    }
+    println!(
+        "{} terrain tiles, {} loaded, {failed} failed",
+        tiles.len(),
+        tiles.len() - failed
     );
 }
 
@@ -658,10 +921,10 @@ fn main() -> Result<()> {
     let romfs_arg = args
         .iter()
         .enumerate()
-        // the romfs folder is the one argument that is neither an option nor the value of --model / --anim
+        // the romfs folder is the one argument that is neither an option nor the value of --model / --anim / --tiles
         .find(|(i, a)| {
             !a.starts_with("--")
-                && (*i == 0 || !matches!(args[i - 1].as_str(), "--model" | "--anim"))
+                && (*i == 0 || !matches!(args[i - 1].as_str(), "--model" | "--anim" | "--tiles"))
         })
         .map(|(_, s)| s.as_str());
     let romfs = romfs_path(romfs_arg);
@@ -684,7 +947,7 @@ fn main() -> Result<()> {
             Err(e) => romfs_error = Some(format!("{e:#}")),
         }
     }
-    let mut models = ar.as_ref().map(|a| a.pokemon_models()).unwrap_or_default();
+    let mut models = ar.as_ref().map(all_models).unwrap_or_default();
     let mut romfs_pick: Option<PathBuf> = None;
 
     let window = Window::new(WindowSettings {
@@ -740,6 +1003,32 @@ fn main() -> Result<()> {
     let mut search = String::new();
     let mut selected: Option<usize> = None;
     let mut pending: Option<usize> = models.iter().position(|m| m.contains(&start_model));
+    let mut category = pending.map_or(Category::Pokemon, |i| Category::of(&models[i]));
+    // The player character: the parts found, the ones picked, and whether it is what is shown.
+    let mut parts: Vec<player::Part> = ar.as_ref().map(player::catalog).unwrap_or_default();
+    let mut outfit = player::Outfit::default_for(&parts);
+    let mut rng: u64 = 0;
+    let mut player_shown = false;
+    // Some(reframe): assemble the player next frame (reframe: also move the camera to it)
+    let mut player_request: Option<bool> = None;
+    if args.iter().any(|a| a == "--player") {
+        category = Category::Player;
+        pending = None;
+        player_request = Some(true);
+    }
+    // The World view: created when its tab is first opened; `world_was_shown` notices tab switches.
+    let mut world: Option<world::World> = None;
+    let mut world_was_shown = false;
+    let mut world_rebuild = false;
+    // --tiles 05_03,06_03: open the World tab showing only these tiles
+    let start_tiles = args
+        .iter()
+        .position(|a| a == "--tiles")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+    if args.iter().any(|a| a == "--world") || start_tiles.is_some() {
+        category = Category::World;
+    }
     let mut lod: usize = 0;
     let mut shading = Shading::Textured;
     let mut normal_maps = true;
@@ -800,8 +1089,13 @@ fn main() -> Result<()> {
                     config::save_romfs_path(&p);
                     romfs_shown = p.display().to_string();
                     romfs_error = None;
-                    models = a.pokemon_models();
+                    models = all_models(&a);
+                    parts = player::catalog(&a);
+                    outfit = player::Outfit::default_for(&parts);
+                    player_shown = false;
+                    player_request = None;
                     ar = Some(a);
+                    world = None;
                     current = None;
                     skel = None;
                     skel_gm = None;
@@ -816,6 +1110,9 @@ fn main() -> Result<()> {
                     pending = models.iter().position(|m| m.contains(&start_model)).or(
                         (!models.is_empty()).then_some(0),
                     );
+                    if category != Category::World {
+                        category = pending.map_or(Category::Pokemon, |i| Category::of(&models[i]));
+                    }
                 }
                 Err(e) => romfs_error = Some(format!("{e:#}")),
             }
@@ -855,26 +1152,58 @@ fn main() -> Result<()> {
             return FrameOutput::default();
         };
 
-        // Load what the list asked for last frame.
+        // The World view: load one queued tile per frame; move the camera on entering and leaving the tab.
+        let world_shown = category == Category::World;
+        if world_shown {
+            let w = world.get_or_insert_with(|| {
+                let mut w = world::World::new(arc);
+                if let Some(list) = &start_tiles {
+                    w.show_only(list);
+                }
+                w.request_shown();
+                w
+            });
+            if std::mem::take(&mut world_rebuild) {
+                w.rebuild(&context);
+            }
+            w.update(&context, arc);
+            if std::mem::take(&mut w.reframe) || !world_was_shown {
+                w.frame(&mut camera, &mut control);
+            }
+        } else if world_was_shown && let Some(c) = &current {
+            frame_camera(&mut camera, &mut control, &c.model);
+        }
+        world_was_shown = world_shown;
+
+        // Load what the list or the player panel asked for last frame. `reframe`: a different model, so the
+        // camera moves to it; a LOD change keeps the skeleton and animation.
+        let mut job: Option<(bool, Result<Prepared>)> = None;
         if let Some(i) = pending.take() {
-            let reframe = selected != Some(i);
+            let reframe = selected != Some(i) || player_shown;
             selected = Some(i);
-            match model::load(arc, &models[i], lod) {
-                Ok(m) => {
+            player_shown = false;
+            job = Some((reframe, load_listed(arc, &models[i], lod, reframe)));
+        } else if let Some(reframe) = player_request.take() {
+            selected = None;
+            player_shown = true;
+            job = Some((reframe, load_player(arc, &parts, &outfit, lod)));
+        }
+        if let Some((reframe, result)) = job {
+            match result {
+                Ok(p) => {
                     if reframe {
-                        frame_camera(&mut camera, &mut control, &m);
+                        frame_camera(&mut camera, &mut control, &p.model);
                     }
-                    if reframe {
-                        (skel, skel_error) = match &m.skeleton_file {
-                            Some(f) => match skeleton::load(arc, &m.dir, f) {
-                                Ok(s) => (Some(s), None),
-                                Err(e) => (None, Some(format!("{e:#}"))),
-                            },
-                            None => (None, Some("the model names no skeleton".into())),
+                    if let Some(s) = p.skel {
+                        (skel, skel_error) = match s {
+                            Ok(s) => (Some(s), None),
+                            Err(e) => (None, Some(e)),
                         };
+                        // a new outfit on the same player keeps the clips that were playing
+                        let keep = (!reframe && player_shown).then_some((anim_index, blend_index));
                         selected_bone = None;
                         skel_dirty = true;
-                        anim_list = anim::list(arc, &m.path);
+                        anim_list = p.anims.unwrap_or_default();
                         anim = None;
                         anim_index = None;
                         anim_error = None;
@@ -884,17 +1213,19 @@ fn main() -> Result<()> {
                         fade = None;
                         last_pose = None;
                         if demo.is_some() {
-                            let (d, f) = start_demo(&context, arc, &anim_list, skel.as_ref(), &m);
+                            let (d, f) = start_demo(&context, arc, &anim_list, skel.as_ref(), &p.model);
                             demo = Some(d);
                             demo_floor = Some(f);
                         }
-                        // --anim <part of a name> picks the first match once, for the start model
-                        if let Some(want) = &start_anim {
+                        if let Some((a, b)) = keep {
+                            anim_request = a.map(Some);
+                            blend_request = b.map(Some);
+                        } else if let Some(want) = &start_anim {
+                            // --anim <part of a name> picks the first match, for the start model
                             anim_request = anim_list.iter().position(|(l, _)| l.contains(want.as_str())).map(Some);
                         }
                     }
-                    let (baked, warnings) = materials::bake(arc, &m);
-                    current = Some(build(&context, m, baked, warnings, shading, normal_maps));
+                    current = Some(build(&context, p.model, p.baked, p.warnings, shading, normal_maps));
                     error = None;
                 }
                 Err(e) => {
@@ -1078,11 +1409,41 @@ fn main() -> Result<()> {
             |ui| {
                 let resp = egui::Panel::left("models").default_size(300.0).resizable(true).show_inside(ui, |ui| {
                     ui.heading("Models");
-                    ui.add(egui::TextEdit::singleline(&mut search).hint_text("search, e.g. pm0025 or 0006"));
+                    ui.horizontal(|ui| {
+                        for c in Category::ALL {
+                            ui.selectable_value(&mut category, c, c.label());
+                        }
+                    });
+                    if category == Category::World {
+                        if let Some(w) = world.as_mut() {
+                            world_rebuild |= w.panel(ui, &mut camera, &mut control);
+                        }
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut lighting, Lighting::Unlit, "Unlit")
+                                .on_hover_text("Soft light from all sides");
+                            ui.radio_value(&mut lighting, Lighting::Lit, "Lit")
+                                .on_hover_text("One sun (no shadows on terrain yet)");
+                        });
+                        ui.separator();
+                    } else if category == Category::Player {
+                        if parts.is_empty() {
+                            ui.label("No player parts found in this dump.");
+                        } else {
+                            ui.small(format!("{} parts. Pick one per slot; changes show at once.", parts.len()));
+                            ui.separator();
+                            if player_panel(ui, &parts, &mut outfit, &mut rng) || (!player_shown && player_request.is_none()) {
+                                player_request = Some(!player_shown);
+                            }
+                        }
+                        ui.separator();
+                    } else {
+                    ui.add(egui::TextEdit::singleline(&mut search).hint_text(category.search_hint()));
                     let q = search.to_lowercase();
+                    let in_category: Vec<usize> =
+                        (0..models.len()).filter(|i| Category::of(&models[*i]) == category).collect();
                     let shown: Vec<usize> =
-                        (0..models.len()).filter(|i| q.is_empty() || models[*i].contains(&q)).collect();
-                    ui.small(format!("{} of {} Pokémon models", shown.len(), models.len()));
+                        in_category.iter().copied().filter(|i| q.is_empty() || models[*i].contains(&q)).collect();
+                    ui.small(format!("{} of {} models", shown.len(), in_category.len()));
                     ui.separator();
 
                     let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
@@ -1100,7 +1461,9 @@ fn main() -> Result<()> {
                         },
                     );
                     ui.separator();
+                    }
 
+                    if category != Category::World {
                     ui.heading("Display");
                     let before = (shading, normal_maps);
                     ui.horizontal(|ui| {
@@ -1148,7 +1511,11 @@ fn main() -> Result<()> {
                             ui.add(egui::Slider::new(&mut l, 0..=c.model.mesh_files - 1).text("LOD"));
                             if l != lod {
                                 lod = l;
-                                pending = selected;
+                                if player_shown {
+                                    player_request = Some(false);
+                                } else {
+                                    pending = selected;
+                                }
                             }
                         }
                         if ui.button("Reset camera").clicked() {
@@ -1292,6 +1659,7 @@ fn main() -> Result<()> {
                             }
                         }
                     }
+                    }
                     if let Some(e) = &error {
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
                     }
@@ -1310,6 +1678,12 @@ fn main() -> Result<()> {
 
                 let right = egui::Panel::right("details").default_size(320.0).resizable(true).show_inside(ui, |ui| {
                   egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if category == Category::World {
+                        if let Some(w) = &world {
+                            w.details(ui);
+                        }
+                        return;
+                    }
                     if let Some(c) = &current {
                         ui.heading(short_name(&c.model.path));
                         ui.small(&c.model.path);
@@ -1417,7 +1791,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                     match *kind {
-                        Key::F7 => demo_toggle = true,
+                        Key::F7 if category != Category::World => demo_toggle = true,
                         Key::Escape if demo.is_some() => demo_toggle = true,
                         k if demo.is_some() && DEMO_KEYS.contains(&k) => {
                             if k == Key::Space && !keys_held.contains(&k) {
@@ -1448,11 +1822,21 @@ fn main() -> Result<()> {
             height: frame_input.viewport.height,
         };
         camera.set_viewport(vp);
+        world::pan(&mut camera, &mut control, &mut frame_input.events);
         control.handle_events(&mut camera, &mut frame_input.events);
 
         let screen = frame_input.screen();
         screen.clear(ClearState::color_and_depth(0.13, 0.14, 0.17, 1.0, 1.0));
-        if let Some(c) = &current {
+        let unlit: [&dyn Light; 4] = [&ambient, &key, &fill, &rim];
+        if let (true, Some(w)) = (world_shown, &world) {
+            sun.clear_shadow_map();
+            let lit: [&dyn Light; 3] = [&sky, &sun, &bounce];
+            let lights: &[&dyn Light] = match lighting {
+                Lighting::Unlit => &unlit,
+                Lighting::Lit => &lit,
+            };
+            w.render(&screen, &camera, lights);
+        } else if let Some(c) = &current {
             let floor = show_floor.then_some(match (&demo, &demo_floor) {
                 (Some(_), Some(f)) => &f.gm,
                 _ => &c.floor,
@@ -1465,7 +1849,6 @@ fn main() -> Result<()> {
                     sun.clear_shadow_map();
                 }
             }
-            let unlit: [&dyn Light; 4] = [&ambient, &key, &fill, &rim];
             let lit: [&dyn Light; 3] = [&sky, &sun, &bounce];
             let lights: &[&dyn Light] = match lighting {
                 Lighting::Unlit => &unlit,
@@ -1475,7 +1858,7 @@ fn main() -> Result<()> {
             screen.render(&camera, meshes.chain(floor), lights);
         }
         // Drawn after the mesh so that, in x-ray mode, it shows through it.
-        if let (true, Some((bones, joints))) = (show_skeleton, &skel_gm) {
+        if let (true, false, Some((bones, joints))) = (show_skeleton, world_shown, &skel_gm) {
             screen.render(&camera, [bones as &dyn Object, joints as &dyn Object], &[]);
         }
         screen.write(|| gui.render()).ok();

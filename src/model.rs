@@ -166,7 +166,7 @@ pub fn load(ar: &mut Archive, path: &str, lod: usize) -> Result<Model> {
     })
 }
 
-fn parse_materials(buf: &[u8]) -> Result<HashMap<String, Material>> {
+pub fn parse_materials(buf: &[u8]) -> Result<HashMap<String, Material>> {
     let root = Table::root(buf, 0)?;
     let mut out = HashMap::new();
     for m in root.tables(1)? {

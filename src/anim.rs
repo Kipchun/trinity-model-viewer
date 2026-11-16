@@ -261,7 +261,17 @@ pub fn list(ar: &mut Archive, model_path: &str) -> Vec<(String, String)> {
         .next()
         .unwrap_or("")
         .trim_end_matches(".trmdl");
-    let Ok(buf) = ar.read(&format!("{dir}{stem}_base.tracr")) else {
+    list_at(ar, &format!("{dir}{stem}_base.tracr"), stem)
+}
+
+/// The animations listed in the .tracr at `tracr_path` (resolved against its folder). `stem` is cut off the front
+/// of each clip's name for its label (e.g. "p0_00" for the player's "p0_00_00000_defaultwait01_loop").
+pub fn list_at(ar: &mut Archive, tracr_path: &str, stem: &str) -> Vec<(String, String)> {
+    let dir = tracr_path
+        .rfind('/')
+        .map(|i| &tracr_path[..=i])
+        .unwrap_or("");
+    let Ok(buf) = ar.read(tracr_path) else {
         return Vec::new();
     };
     let mut out: Vec<(String, String)> = Vec::new();

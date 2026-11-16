@@ -49,17 +49,22 @@ clothing/body textures), `charamotion_*` (274, `.trmdt`, `.tracn`, `.tracr`), `c
 - Collision `.trcol` (19) is optional; useful as a debug overlay.
 - Scene viewer UI: object list as a tree, click to select and frame, toggle categories, free-fly camera (WASD +
   mouse) since scenes are large.
+- Play mode inside scenes (run a Pokémon or human around a room or town): see
+  [PLAY_IN_SCENES_PLAN.md](PLAY_IN_SCENES_PLAN.md). Its first steps use a single interior or terrain `.trmdl` as
+  the world, so they don't wait for `.trscn`.
 
 ## Phase 4: the overworld, Area Zero
 
 - Terrain is tiled: `field_graphic/terrain/terrain_XX_YY/ter_XX_YY.trtrr` (`.trtrr` 38 packs,
   `terrain_` 137 packs) with `clod/clod_terrain_XX_YY_*` (334 packs; coarse LOD meshes, a good first target as
   they are ordinary `.trmdl`) and `clod_town_tNN_*` for towns.
-- Load the `clod` meshes for the whole grid first: it gives a full-map view cheaply. Then `.trtrr` heightfield
-  and splat materials for close-up detail, streamed by camera distance.
+- **Done (2026-11-15):** the heightfield of every tile and its splat ground textures (`terrain.rs`, World tab).
+  Next: layer normal maps, then
+  `clod` meshes for distance and towns, streamed by camera distance.
 - Then place field objects on top from the world's scene/placement files (not found yet; candidates: `.trsot`,
   `.trins`, `world/data/...`).
-- **Area Zero**: its asset prefix is not identified yet (no "zero"/"crater" in pack names). Find it by elimination
+- **Area Zero**: its asset prefix is not identified yet (no "zero"/"crater" in pack names). The crater is a hole in
+  the overworld heightfield (central tiles around 04_04-05_05), so it is modelled separately. Find it by elimination
   over terrain tiles and area codes (the `a_w##` / `area##` style codes, field object groups) once the map grid
   renders. Record the answer in ARCHIVE_PATHS.md.
 - Kitakami / Blueberry Academy DLC content is in `*_dlc1_*`, `*_dlc2_*` paths.
@@ -67,7 +72,8 @@ clothing/body textures), `charamotion_*` (274, `.trmdt`, `.tracn`, `.tracr`), `c
 ## Phase 5: polish
 
 - Effects (`.ptcl`, `.traef`), emission/roughness, transparency sorting, material and face animations.
-- Export (glTF) of whatever is loaded, for the user's own use. Keep exports out of the repo.
+- Export (glTF) of whatever is loaded, for the user's own use. Keep exports out of the repo. Planned in detail in
+  [EXPORT_PLAN.md](EXPORT_PLAN.md); its first steps (Pokémon) don't depend on the phases above, so it can start any time.
 - Performance: GPU skinning, instancing for vegetation, texture cache across models.
 
 ## Open questions
