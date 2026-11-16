@@ -11,14 +11,14 @@ The field layouts of read formats live in the doc comment at the top of each sou
 | `.trmdl` | 2,389 | read (Pokémon, trainers, props) | model: meshes, skeleton, materials, LODs. All 264 trainer/prop models load with no warnings; player-base models have no meshes | `model.rs` |
 | `.trmsh` | — | read | mesh shapes, vertex layouts | `model.rs` |
 | `.trmbf` | 281 | read | vertex and index buffers | `model.rs` |
-| `.trmtr` | 19 | read | materials | `model.rs`, `materials.rs` |
+| `.trmtr` | 19 | read | materials: textures, float/float4 params, shader name + switches (`EnableAlphaTest`, ...), render type (`Opaque`, `Blend`, `BlendPreMultiAlpha`, `Add`, `Mul`); `probe --transparency` surveys them | `model.rs`, `materials.rs` |
 | `.trmmt` | 23 | unknown | material sets / variants (guess: alt colours, outfit variants) | |
 | `.bntx` | 4,984 | read (first mip, any array layer; RGBA32F for the splat params) | textures | `texture.rs` |
 | `.trskl` | 159 | read | skeletons. Player parts: slot 4 = joint offset in the player's shared joint list, node slot 6 = base bone to hang from (all 208 parts attach cleanly) | `skeleton.rs` |
 | `.tranm` | 162 | read | skeletal animation | `anim.rs` |
-| `.tracr` | 95 | partial (`_base.tracr`) | animation list of a model; the player's is `chara/motion_pc/base/p0_base.tracr` (727 clips) | `anim.rs` |
+| `.tracr` | 95 | partial (`_base.tracr`) | animation list of a model; the player's is `chara/motion_pc/base/p0_base.tracr` (727 clips); trainers' in `chara/motion_cc_base/` and `motion_uq/` (see `motion.rs`); `motion_tr/.../<code>_00_head00.tracr` lists face clips | `anim.rs`, `motion.rs` |
 | `.tracn` | 22 | unknown | guess: non-skeletal curves (face, material, visibility) | |
-| `.trmdt` | 385 | partly | motion set per body type: `{0: [string]}` naming a `.trmdd` ("motion detector") file, e.g. `cc0004_adl_m_motion_detector.trmdd` | |
+| `.trmdt` | 385 | partly | motion set per body type: `{0: [string]}` naming a `.trmdd` ("motion detector") file, e.g. `cc0004_adl_m_motion_detector.trmdd`. A trainer's own `.trmdt` names either itself or the body type it is built on (`tr0420_00.trmdt`: `cc0005_adl_f`) | `motion.rs` (the name only) |
 | `.tracp` | 359 | unknown | cutscene animation (`chara/demo/...`) | |
 | `.tracm` | 43 | unknown | guess: camera animation | |
 | `.trcma` | 64 | unknown | | |

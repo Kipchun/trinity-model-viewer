@@ -6,7 +6,7 @@
 //!               4: [MaterialInfo {0: index count, 1: index offset, 3: material name}], 12: mesh name }
 //!   VertexAccessors { 0: [Attribute {1: semantic, 2: layer, 3: format, 4: byte offset}], 1: [{0: stride}] }
 //!   trmbf  { 1: [Buffer {0: [{0: index bytes}], 1: [{0: vertex bytes}] per accessor stream}] }
-//!   trmtr  { 1: [Material {0: name, 1: [shader], 2: [Texture {0: role, 1: .bntx file, 2: slot}],
+//!   trmtr  { 1: [Material {0: name, 1: [Shader {0: name, 1: [{0: switch, 1: value string}]}], 2: [Texture {0: role, 1: .bntx file, 2: slot}],
 //!               4: [{0: name, 1: float}] (e.g. LayerMaskScale1), 7: [{0: name, 1: float4}] (e.g. UVScaleOffset,
 //!               BaseColorLayer1), 15: render type}] }
 //!   A parameter stored without a value has the FlatBuffers default, 0.
@@ -41,7 +41,11 @@ pub struct Material {
     pub textures: Vec<(String, String)>,
     pub params: HashMap<String, [f32; 4]>,
     pub floats: HashMap<String, f32>,
+    /// trmtr slot 15: "Opaque", "Transparent", ...
     pub render_type: String,
+    /// The first shader's name ("Standard", "SSS", "Eye", ...) and its switches ("EnableAlphaTest" -> "True").
+    pub shader: String,
+    pub switches: HashMap<String, String>,
 }
 
 impl Material {
@@ -175,6 +179,14 @@ pub fn parse_materials(buf: &[u8]) -> Result<HashMap<String, Material>> {
             render_type: m.string(15)?.unwrap_or_default(),
             ..Default::default()
         };
+        if let Some(sh) = m.tables(1)?.first() {
+            mat.shader = sh.string(0)?.unwrap_or_default();
+            for sw in sh.tables(1)? {
+                if let (Some(k), Some(v)) = (sw.string(0)?, sw.string(1)?) {
+                    mat.switches.insert(k, v);
+                }
+            }
+        }
         for t in m.tables(2)? {
             if let (Some(role), Some(file)) = (t.string(0)?, t.string(1)?) {
                 mat.textures.push((role, file));

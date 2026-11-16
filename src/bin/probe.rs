@@ -17,6 +17,8 @@
 //!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
 //!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
 //!   cargo run --release --bin probe -- --characters            list the character models discovery finds
+//!   cargo run --release --bin probe -- --transparency          shader, render type and alpha switches of every material
+//!   cargo run --release --bin probe -- --trainer-anims         every human model: own clip list, named and best-fit body type
 #[path = "../anim.rs"]
 mod anim;
 #[path = "../archive.rs"]
@@ -29,6 +31,8 @@ mod fb;
 mod materials;
 #[path = "../model.rs"]
 mod model;
+#[path = "../motion.rs"]
+mod motion;
 #[path = "../player.rs"]
 mod player;
 #[path = "../skeleton.rs"]
@@ -348,6 +352,12 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--player" {
         return player_check(&mut ar);
+    }
+    if args[0] == "--transparency" {
+        return transparency(&mut ar);
+    }
+    if args[0] == "--trainer-anims" {
+        return trainer_anims(&mut ar);
     }
     if args[0] == "--characters" {
         for p in ar.character_models() {
@@ -1132,4 +1142,247 @@ pub fn anim_list(ar: &mut archive::Archive, m: &str) {
     {
         println!("  missing {n}");
     }
+}
+
+/// For every human model (chara/model_tr, model_uq, model_vr): its own clip list, extra clips, the body type its
+/// .trmdt names, and how many tracks of the idle clip it would play land on its bones. For models without their own
+/// list, the matched tracks of every body type's idle clip.
+fn trainer_anims(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    let folders = motion::folders(ar);
+    let bodies = motion::body_types(&folders);
+    println!(
+        "{} motion folders, {} body types: {bodies:?}",
+        folders.len(),
+        bodies.len()
+    );
+    let models: Vec<String> = ar
+        .character_models()
+        .into_iter()
+        .filter(|p| !p.starts_with("chara/model_ob/"))
+        .collect();
+    let (mut own, mut named, mut extra, mut no_skel, mut bad, mut vr_bad) = (0, 0, 0, 0, 0, 0);
+    for path in &models {
+        let skel = model::load(ar, path, 0).and_then(|m| {
+            let f = m
+                .skeleton_file
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("no skeleton"))?;
+            skeleton::load(ar, &m.dir, &f)
+        });
+        let skel = match skel {
+            Ok(s) => s,
+            Err(e) if path.starts_with("chara/model_vr/") => {
+                // NPC parts: put the part on the shared base skeleton and count vertices left without a bone
+                match player::assemble_on(ar, motion::VR_BASE_SKELETON, "vr", &[path.as_str()], 0) {
+                    Ok(a) => {
+                        let (mut bad, mut total) = (0, 0);
+                        for s in &a.model.submeshes {
+                            let (Some(j), Some(w)) = (&s.joints, &s.weights) else {
+                                continue;
+                            };
+                            for (j, w) in j.iter().zip(w) {
+                                total += 1;
+                                bad += (0..4).any(|k| {
+                                    w[k] > 0.0 && a.skeleton.joint_bone(j[k] as usize).is_none()
+                                }) as usize;
+                            }
+                        }
+                        println!(
+                            "{path}: ({e:#}) on the base skeleton: {} bones, {bad} of {total} vertices off a bone, warnings {:?}",
+                            a.skeleton.bones.len(),
+                            a.warnings
+                        );
+                        vr_bad += (bad > 0 || !a.warnings.is_empty()) as usize;
+                        a.skeleton
+                    }
+                    Err(e2) => {
+                        no_skel += 1;
+                        println!("{path}: {e:#}; on the base skeleton: {e2:#}");
+                        continue;
+                    }
+                }
+            }
+            Err(e) => {
+                no_skel += 1;
+                println!("{path}: {e:#}");
+                continue;
+            }
+        };
+        let found = motion::find(ar, &folders, path);
+        own += found.own.is_some() as usize;
+        named += found.named_body.is_some() as usize;
+        extra += !found.extra.is_empty() as usize;
+        let clips = motion::clips(ar, &found, None);
+        let idle = clips
+            .iter()
+            .find(|(l, _)| l.ends_with("defaultwait01_loop"))
+            .and_then(|(l, p)| anim::load(ar, p, l).ok())
+            .map(|c| {
+                let m = c
+                    .tracks
+                    .iter()
+                    .filter(|t| skel.bones.iter().any(|b| b.name == t.name))
+                    .count();
+                format!("{m}/{}", c.tracks.len())
+            });
+        // every clip must load
+        let failed = clips
+            .iter()
+            .filter(|(l, p)| anim::load(ar, p, l).is_err())
+            .count();
+        bad += failed;
+        println!(
+            "{path}: {} bones; own {:?}, {} clips ({failed} fail), extra {:?}; named {:?}; idle on bones {idle:?}",
+            skel.bones.len(),
+            found
+                .own
+                .as_deref()
+                .map(|p| p.rsplit('/').next().unwrap_or(p)),
+            clips.len(),
+            found
+                .extra
+                .iter()
+                .map(|(l, _)| l.as_str())
+                .collect::<Vec<_>>(),
+            found.named_body,
+        );
+        if found.own.is_none() {
+            let fits: Vec<String> = bodies
+                .iter()
+                .filter_map(|b| {
+                    body_fit(ar, &skel, b)
+                        .map(|f| format!("{}:{}/{} {:.4}", &b[7..], f.matched, f.tracks, f.error))
+                })
+                .collect();
+            println!("    fits {}", fits.join("  "));
+        }
+    }
+    println!(
+        "{} models: {own} own list, {extra} with extra clips, {named} name a body type, {no_skel} without a skeleton, {vr_bad} vr parts off the base skeleton, {bad} clips failed to load",
+        models.len()
+    );
+    Ok(())
+}
+
+/// How well a body type's idle clip fits a skeleton.
+#[derive(Clone, Copy, Debug)]
+struct Fit {
+    /// Tracks of the clip that name a bone of the skeleton, and all its tracks.
+    matched: usize,
+    tracks: usize,
+    /// Mean distance (metres) between the clip's first-frame bone offsets and the skeleton's rest offsets, over the
+    /// matched tracks that move bones.
+    error: f32,
+}
+
+fn body_fit(ar: &mut archive::Archive, skel: &skeleton::Skeleton, body: &str) -> Option<Fit> {
+    let path = format!(
+        "chara/motion_cc_base/{body}/{body}_{}.tranm",
+        motion::IDLE_CLIP
+    );
+    let clip = anim::load(ar, &path, body).ok()?;
+    let (mut matched, mut sum, mut n) = (0usize, 0.0f32, 0usize);
+    for t in &clip.tracks {
+        let Some(b) = skel.bones.iter().find(|b| b.name == t.name) else {
+            continue;
+        };
+        matched += 1;
+        if let Some(v) = t.sample(0.0).translation {
+            let r = b.translation;
+            sum += ((v.x - r[0]).powi(2) + (v.y - r[1]).powi(2) + (v.z - r[2]).powi(2)).sqrt();
+            n += 1;
+        }
+    }
+    Some(Fit {
+        matched,
+        tracks: clip.tracks.len(),
+        error: if n > 0 { sum / n as f32 } else { f32::INFINITY },
+    })
+}
+
+/// (shader, render type, alpha test) -> (count, example names, discard values)
+type MaterialGroups =
+    std::collections::BTreeMap<(String, String, String), (usize, Vec<String>, Vec<String>)>;
+
+/// Every material of every model and player part, grouped by shader, render type (trmtr slot 15) and the shader's
+/// EnableAlphaTest switch, with counts, example names, and DiscardValue values seen.
+fn transparency(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let mut paths = ar.pokemon_models();
+    paths.extend(ar.character_models());
+    paths.extend(ar.player_parts());
+    // TRANSP_FILTER=chara/model_ narrows the survey to paths containing it
+    if let Ok(f) = std::env::var("TRANSP_FILTER") {
+        paths.retain(|p| p.contains(&f));
+    }
+    // (shader, render type, alpha test) -> (count, example names, discard values)
+    let mut groups: MaterialGroups = BTreeMap::new();
+    let mut switch_names: BTreeMap<String, usize> = BTreeMap::new();
+    // materials without a LayerMaskMap whose BaseColor is not white: (shader, has BaseColorMap,
+    // EnableBaseColorMap) -> (count, examples)
+    let mut tinted: BTreeMap<(String, bool, String), (usize, Vec<String>)> = BTreeMap::new();
+    for p in &paths {
+        let Ok(m) = model::load(ar, p, 0) else {
+            continue;
+        };
+        let kind = p.split('/').nth(1).unwrap_or("");
+        for (name, mat) in &m.materials {
+            for k in mat.switches.keys() {
+                *switch_names.entry(k.clone()).or_default() += 1;
+            }
+            if mat.texture("LayerMaskMap").is_none()
+                && let Some(c) = mat.params.get("BaseColor")
+                && c[..3].iter().any(|v| (v - 1.0).abs() > 0.01)
+            {
+                let key = (
+                    mat.shader.clone(),
+                    mat.texture("BaseColorMap").is_some(),
+                    mat.switches
+                        .get("EnableBaseColorMap")
+                        .cloned()
+                        .unwrap_or("-".into()),
+                );
+                let t = tinted.entry(key).or_default();
+                t.0 += 1;
+                if t.1.len() < 10 {
+                    t.1.push(format!(
+                        "{}:{name} {:.2?}",
+                        p.split('/').nth(1).unwrap_or(""),
+                        &c[..3]
+                    ));
+                }
+            }
+            let key = (
+                mat.shader.clone(),
+                mat.render_type.clone(),
+                mat.switches
+                    .get("EnableAlphaTest")
+                    .cloned()
+                    .unwrap_or("-".into()),
+            );
+            let g = groups.entry(key).or_default();
+            g.0 += 1;
+            let ex = format!("{kind}:{name}");
+            if g.1.len() < 40 && !g.1.contains(&ex) {
+                g.1.push(ex);
+            }
+            if let Some(d) = mat.floats.get("DiscardValue") {
+                let d = format!("{d}");
+                if g.2.len() < 6 && !g.2.contains(&d) {
+                    g.2.push(d);
+                }
+            }
+        }
+    }
+    for ((shader, rt, at), (n, ex, disc)) in &groups {
+        println!("{shader:>14} {rt:>12} alphatest={at:<5} {n:>6}  discard {disc:?}  e.g. {ex:?}");
+    }
+    println!("switches: {switch_names:?}");
+    println!(
+        "BaseColor not white, no LayerMaskMap: (shader, has BaseColorMap, EnableBaseColorMap)"
+    );
+    for ((sh, has, en), (n, ex)) in &tinted {
+        println!("{sh:>14} map={has:<5} enable={en:<5} {n:>5}  e.g. {ex:?}");
+    }
+    Ok(())
 }

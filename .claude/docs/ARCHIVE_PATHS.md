@@ -19,7 +19,9 @@ example path shown; the others are inferred and need a check.
 | `charamodel_pc` | `chara/model_pc/p0_bag0000_schoolbackpack/p0_bag0000_00_bag00.trmdl` | player parts (`p0`/`p1`; acc, bag, drs, eyw, face, ftw, glv, hdw, hrs, lgw) | confirmed |
 | `charamodel_cc_base` | `chara/model_cc_base/model/cc_base.trmdl` | crowd-NPC base: skeleton only | confirmed |
 | `charasharecm_` | `chara/share_cm/...`? | shared clothing / body textures (`cm_drs####`, `uni`, `fes`, ...) | inferred |
-| `charamotion_cc_base` | `chara/motion_cc_base/cc0004_adl_m/cc0004_adl_m.trmdt` | character motions per body type and per trainer | confirmed |
+| `charamotion_cc_base` | `chara/motion_cc_base/cc0004_adl_m/cc0004_adl_m.tracr` | 25 shared body types (`cc0001_kid` .. `cc2011_cla_f`): clip list `<type>.tracr`, clips `<type>_<NNNNN>_<name>.tranm`; per-trainer folders (`tr0420_mountain/tr0420_00.tracr`) with full lists or per-clip files of special actions | confirmed |
+| `charamotion_uq` | `chara/motion_uq/tr0080_principal/tr0080_00.tracr` | named characters' own clip lists (`tr0080_00_<NNNNN>_<name>.tranm`) | confirmed |
+| `charamotion_tr`, `_vr` | `chara/motion_tr/tr0360_tanpan/tr0360_00_head00.tracr` | face clips (`.tracr`/`.tracp`/`.tracl`/`.tracn` of the head), spring bones (`.trspb`) | confirmed |
 | `charademo_` | `chara/demo_cc_base/...`? | cutscene clips (`.tracp`) | inferred |
 | `field_graphicterrain_model` | `field_graphic/terrain_model/plants_me_tree_pine03/plants_me_tree_pine03.trmdl` | objects, plants, ground | confirmed |
 | `field_graphicterrainterrain_` | `field_graphic/terrain/terrain_00_00/ter_00_00.trtrr` | overworld terrain tiles | confirmed |

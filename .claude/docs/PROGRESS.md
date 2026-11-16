@@ -73,6 +73,35 @@ Update this file at the end of each work session: move items between sections, a
 - Not done: layer normal maps (`SplatNormal`), roughness per layer, row 1 of the params (flags: x = 2 on layers
   16–18, 30–31: triplanar?), `SplatSTnFar`/thresholds, distance colour. Greens look more saturated than in game.
 
+### Trainer and NPC animations (2026-11-16, not committed yet)
+- `src/motion.rs`: clips of `model_tr`, `model_uq`, `model_vr` from `chara/motion_cc_base/` and `motion_uq/`.
+  80 models have their own full list (`<code>_00.tracr`), 52 have per-clip special actions (karate02_loop, ...),
+  the rest use one of 25 shared body types (`cc0001_kid` .. `cc2011_cla_f`). `motion_tr`/`motion_vr` hold only face
+  clips and spring bones.
+- Body types are motion styles, not proportions: each type's idle drives 57 of 58 tracks of every `model_tr`
+  skeleton and matches its rest offsets within 3 mm. Default without own list: the type the `.trmdt` names, else a
+  guess from the folder name (child/infant: kid, ends in f: adl_f, else adl_m). **Not known yet how the game picks
+  it**; probably a trainer/NPC data table.
+- `model_vr` parts name no skeleton: they go on `chara/model_cc_base/model/cc_base.trskl` (74 bones) via
+  `player::assemble_on`; all 28 parts, 0 vertices off a bone. `tr0601`/`tr0611` (`vat`) have no skeleton at all
+  (vertex animation textures?).
+- Viewer: **Body motions** drop-down in the Animation section (own clips / any body type), keeps the playing clip by
+  label; play mode uses the list. `--check`: 133 trainers and NPCs, 2 without a skeleton (the vat ones), 0 without
+  clips. Probe: `--trainer-anims` (every list, clip load and body-type fit): 0 clips fail.
+- Launched on tr0330 (walk) and a vr part without errors; not yet looked at in the window.
+
+### Eyes and transparency (2026-11-16, not committed yet)
+- `.trmtr` shader name and switches now parsed (slot 1: `{0: name, 1: [{0: switch, 1: value}]}`).
+- Alpha from the render type and `EnableAlphaTest`/`DiscardValue` (`materials::AlphaMode`): eye lenses, glasses,
+  visors blend (three-d's transparent pass, back to front); hair/lashes/brows cut out at their own threshold; `Add`
+  and `Mul` effects. Blend only when the colour has alpha < 1 (Pokémon `BlendPreMultiAlpha` eyes are opaque).
+- `BaseColor` without a layer mask: flat colour when there is no colour map (eyelashes were grey, now black);
+  hair colour for the `Hair` shader (208 materials).
+- Seen in the window (`--look head`, new option): tr0040 eyes now show iris and highlight (the opaque lens hid
+  them), tr0080's glasses are see-through, Pikachu unchanged.
+- Known: Pokémon `EyeClearCoat` eyes have no highlight in their data; the game's shader adds it (clear coat,
+  `NormalMap1`). Needs a custom eye shader.
+
 ## In flight
 
 - Commit the play-mode work (waiting on the user).
@@ -90,9 +119,9 @@ See [ROADMAP.md](ROADMAP.md). Immediate next steps:
 3. Phase 1 of the roadmap, continued:
    - Look at a few trainers and props in the window; check materials that use `DetailMaskMap`, `NormalMap1/2`,
      `HairFlowMap`, `SSSMaskMap` (ignored by the bake for now).
-   - Trainer animations: `.trmdt` names a `.trmdd` ("motion detector") file; study that next. Clips are probably
-     `.tranm` per body type under `chara/motion_cc_base/`. The bone tracks are by name, so trainers whose bones
-     match `cc_base` can share clips.
+   - Trainer animations (done 2026-11-16): next, find the game's body type per trainer/NPC (data tables), face
+     clips (`motion_tr/.../_head00.tracr`, `.tracp`), the `vat` trainers, and `model_vr` assembly (body + head +
+     parts on `cc_base`, like the player).
    - Player: clothing colour variants (`.trmmt`, 7 packs), face animation (`p0_face0000.tracn`).
    - `model_vr` body + head parts: assemble the same way.
 4. glTF export (planned 2026-11-15, [EXPORT_PLAN.md](EXPORT_PLAN.md)): single model and bulk per category into an

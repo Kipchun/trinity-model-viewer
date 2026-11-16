@@ -20,6 +20,7 @@ mod demo;
 mod fb;
 mod materials;
 mod model;
+mod motion;
 mod player;
 mod skeleton;
 mod terrain;
@@ -112,28 +113,75 @@ struct Prepared {
     anims: Option<Vec<(String, String)>>,
     baked: HashMap<String, materials::Baked>,
     warnings: Vec<String>,
+    /// A trainer's or NPC's motions (`None` for Pokémon, props and the player); only with a fresh skeleton.
+    motion: Option<CharMotion>,
 }
 
-/// Loads a listed model; with `fresh`, also its skeleton and animation list.
+/// A human character's motions: what was found for it, and the body type whose clips are listed (`None`: its
+/// own list).
+struct CharMotion {
+    found: motion::Found,
+    body: Option<String>,
+}
+
+/// Where the clips of trainers and NPCs are looked up: the motion folders and the shared body types.
+#[derive(Default)]
+struct Motions {
+    folders: Vec<motion::Folder>,
+    bodies: Vec<String>,
+}
+
+impl Motions {
+    fn new(ar: &archive::Archive) -> Self {
+        let folders = motion::folders(ar);
+        let bodies = motion::body_types(&folders);
+        Motions { folders, bodies }
+    }
+}
+
+/// Loads a listed model; with `fresh`, also its skeleton and animation list. The NPC parts of chara/model_vr name
+/// no skeleton and are put on the shared base skeleton; trainers and NPCs get their clips from `motion`.
 fn load_listed(
     arc: &mut archive::Archive,
+    motions: &Motions,
     path: &str,
     lod: usize,
     fresh: bool,
 ) -> Result<Prepared> {
-    let m = model::load(arc, path, lod)?;
-    let skel = fresh.then(|| match &m.skeleton_file {
-        Some(f) => skeleton::load(arc, &m.dir, f).map_err(|e| format!("{e:#}")),
-        None => Err("the model names no skeleton".into()),
-    });
-    let anims = fresh.then(|| anim::list(arc, &m.path));
-    let (baked, warnings) = materials::bake(arc, &m);
+    let (m, skel, baked, warnings) = if motion::is_vr_part(path) {
+        let a = player::assemble_on(arc, motion::VR_BASE_SKELETON, path, &[path], lod)?;
+        (
+            a.model,
+            fresh.then_some(Ok(a.skeleton)),
+            a.baked,
+            a.warnings,
+        )
+    } else {
+        let m = model::load(arc, path, lod)?;
+        let skel = fresh.then(|| match &m.skeleton_file {
+            Some(f) => skeleton::load(arc, &m.dir, f).map_err(|e| format!("{e:#}")),
+            None => Err("the model names no skeleton".into()),
+        });
+        let (baked, warnings) = materials::bake(arc, &m);
+        (m, skel, baked, warnings)
+    };
+    let (anims, motion) = if !fresh {
+        (None, None)
+    } else if motion::is_human(path) {
+        let found = motion::find(arc, &motions.folders, path);
+        let body = motion::default_body(&found, path, &motions.bodies);
+        let clips = motion::clips(arc, &found, body.as_deref());
+        (Some(clips), Some(CharMotion { found, body }))
+    } else {
+        (Some(anim::list(arc, &m.path)), None)
+    };
     Ok(Prepared {
         model: m,
         skel,
         anims,
         baked,
         warnings,
+        motion,
     })
 }
 
@@ -151,6 +199,7 @@ fn load_player(
         anims: Some(anim::list_at(arc, player::ANIM_LIST, player::ANIM_STEM)),
         baked: a.baked,
         warnings: a.warnings,
+        motion: None,
     })
 }
 
@@ -283,6 +332,41 @@ fn all_models(ar: &archive::Archive) -> Vec<String> {
     models
 }
 
+/// A three-d material for a Trinity alpha mode: blended ones are drawn after the opaque ones, back to front, and do
+/// not write depth (three-d's transparent pass).
+fn transparent_material(
+    context: &Context,
+    m: &CpuMaterial,
+    alpha: materials::AlphaMode,
+) -> PhysicalMaterial {
+    use materials::AlphaMode;
+    let blend = match alpha {
+        AlphaMode::Opaque | AlphaMode::Cutout(_) => {
+            return PhysicalMaterial::new_opaque(context, m);
+        }
+        AlphaMode::Blend => Blend::TRANSPARENCY,
+        AlphaMode::Add => Blend::Enabled {
+            source_rgb_multiplier: BlendMultiplierType::SrcAlpha,
+            source_alpha_multiplier: BlendMultiplierType::Zero,
+            destination_rgb_multiplier: BlendMultiplierType::One,
+            destination_alpha_multiplier: BlendMultiplierType::One,
+            rgb_equation: BlendEquationType::Add,
+            alpha_equation: BlendEquationType::Add,
+        },
+        AlphaMode::Multiply => Blend::Enabled {
+            source_rgb_multiplier: BlendMultiplierType::DstColor,
+            source_alpha_multiplier: BlendMultiplierType::Zero,
+            destination_rgb_multiplier: BlendMultiplierType::Zero,
+            destination_alpha_multiplier: BlendMultiplierType::One,
+            rgb_equation: BlendEquationType::Add,
+            alpha_equation: BlendEquationType::Add,
+        },
+    };
+    let mut pm = PhysicalMaterial::new_transparent(context, m);
+    pm.render_states.blend = blend;
+    pm
+}
+
 /// A stable, soft colour per material name.
 fn material_color(name: &str) -> Srgba {
     let h = archive::fnv1a64(name);
@@ -317,6 +401,25 @@ fn check(ar: &mut archive::Archive) {
         models.len(),
         models.len() - failed
     );
+    // trainers and NPCs as the viewer opens them: skeleton (model_vr parts on the base skeleton) and clip list
+    let motions = Motions::new(ar);
+    let (mut humans, mut no_skel, mut no_clips) = (0, 0, 0);
+    for m in models.iter().filter(|m| motion::is_human(m)) {
+        humans += 1;
+        match load_listed(ar, &motions, m, 0, true) {
+            Ok(p) => {
+                if let Some(Err(e)) = &p.skel {
+                    no_skel += 1;
+                    println!("NO SKELETON {m}: {e}");
+                } else if p.anims.as_ref().is_none_or(|a| a.is_empty()) {
+                    no_clips += 1;
+                    println!("NO CLIPS {m}");
+                }
+            }
+            Err(e) => println!("FAIL {m}: {e:#}"),
+        }
+    }
+    println!("{humans} trainers and NPCs: {no_skel} without a skeleton, {no_clips} without clips");
     let tiles = terrain::tiles(ar);
     let mut failed = 0;
     let mut layers_checked = false;
@@ -536,12 +639,24 @@ fn build(
                     albedo: grey,
                     ..Default::default()
                 };
+                let mut alpha = materials::AlphaMode::Opaque;
                 match (shading, bk) {
                     (Shading::Textured, Some(b)) => {
                         if let Some(a) = &b.albedo {
                             m.albedo = Srgba::WHITE;
                             m.albedo_texture = Some(cpu_texture(a));
-                            m.alpha_cutout = b.cutout.then_some(0.5);
+                        } else if let Some(c) = b.color {
+                            let to8 = |v: f32| (materials::linear_to_srgb(v) * 255.0).round() as u8;
+                            m.albedo = Srgba::new(
+                                to8(c[0]),
+                                to8(c[1]),
+                                to8(c[2]),
+                                (c[3].clamp(0.0, 1.0) * 255.0).round() as u8,
+                            );
+                        }
+                        alpha = b.alpha;
+                        if let materials::AlphaMode::Cutout(t) = alpha {
+                            m.alpha_cutout = Some(t);
                         }
                         if use_normal_map {
                             m.normal_texture = b.normal.as_ref().map(cpu_texture);
@@ -550,7 +665,7 @@ fn build(
                     (Shading::MaterialColours, _) => m.albedo = material_color(&s.material),
                     _ => {}
                 }
-                PhysicalMaterial::new_opaque(context, &m)
+                transparent_material(context, &m, alpha)
             })
             .clone();
         meshes.push(Gm::new(Mesh::new(context, &cpu), material));
@@ -909,6 +1024,27 @@ fn frame_camera(camera: &mut Camera, control: &mut OrbitControl, model: &model::
     *control = OrbitControl::new(center, radius * 0.2, radius * 30.0);
 }
 
+/// Puts the camera close in front of a bone (the first whose name contains `name`), e.g. "head" for a face.
+fn look_at_bone(
+    camera: &mut Camera,
+    control: &mut OrbitControl,
+    skel: &skeleton::Skeleton,
+    name: &str,
+) {
+    let Some(i) = skel
+        .bones
+        .iter()
+        .position(|b| b.name == name)
+        .or_else(|| skel.bones.iter().position(|b| b.name.contains(name)))
+    else {
+        return;
+    };
+    let target = skel.position(i, true);
+    camera.set_view(target + vec3(0.0, 0.02, 0.45), target, vec3(0.0, 1.0, 0.0));
+    camera.set_perspective_projection(degrees(40.0), 0.005, 50.0);
+    *control = OrbitControl::new(target, 0.05, 10.0);
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let check_only = args.iter().any(|a| a == "--check");
@@ -924,7 +1060,11 @@ fn main() -> Result<()> {
         // the romfs folder is the one argument that is neither an option nor the value of --model / --anim / --tiles
         .find(|(i, a)| {
             !a.starts_with("--")
-                && (*i == 0 || !matches!(args[i - 1].as_str(), "--model" | "--anim" | "--tiles"))
+                && (*i == 0
+                    || !matches!(
+                        args[i - 1].as_str(),
+                        "--model" | "--anim" | "--tiles" | "--look"
+                    ))
         })
         .map(|(_, s)| s.as_str());
     let romfs = romfs_path(romfs_arg);
@@ -948,6 +1088,7 @@ fn main() -> Result<()> {
         }
     }
     let mut models = ar.as_ref().map(all_models).unwrap_or_default();
+    let mut motions = ar.as_ref().map(Motions::new).unwrap_or_default();
     let mut romfs_pick: Option<PathBuf> = None;
 
     let window = Window::new(WindowSettings {
@@ -1049,6 +1190,9 @@ fn main() -> Result<()> {
 
     // Animation: the model's list (label, path), the selected entry and the clip loaded from it.
     let mut anim_list: Vec<(String, String)> = Vec::new();
+    // A trainer's or NPC's motions, and a body type picked in the panel (Some(None): its own clips).
+    let mut char_motion: Option<CharMotion> = None;
+    let mut body_request: Option<Option<String>> = None;
     let mut anim: Option<Clip> = None;
     let mut anim_index: Option<usize> = None;
     let mut anim_request: Option<Option<usize>> = None;
@@ -1075,6 +1219,12 @@ fn main() -> Result<()> {
     let mut shift = false;
     let mut jump_queued = false;
     let mut loop_anim = true;
+    // --look head: frame the start model's camera on that bone
+    let mut look_bone = args
+        .iter()
+        .position(|a| a == "--look")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     let start_anim = args
         .iter()
         .position(|a| a == "--anim")
@@ -1090,6 +1240,8 @@ fn main() -> Result<()> {
                     romfs_shown = p.display().to_string();
                     romfs_error = None;
                     models = all_models(&a);
+                    motions = Motions::new(&a);
+                    char_motion = None;
                     parts = player::catalog(&a);
                     outfit = player::Outfit::default_for(&parts);
                     player_shown = false;
@@ -1182,7 +1334,7 @@ fn main() -> Result<()> {
             let reframe = selected != Some(i) || player_shown;
             selected = Some(i);
             player_shown = false;
-            job = Some((reframe, load_listed(arc, &models[i], lod, reframe)));
+            job = Some((reframe, load_listed(arc, &motions, &models[i], lod, reframe)));
         } else if let Some(reframe) = player_request.take() {
             selected = None;
             player_shown = true;
@@ -1204,6 +1356,7 @@ fn main() -> Result<()> {
                         selected_bone = None;
                         skel_dirty = true;
                         anim_list = p.anims.unwrap_or_default();
+                        char_motion = p.motion;
                         anim = None;
                         anim_index = None;
                         anim_error = None;
@@ -1225,6 +1378,9 @@ fn main() -> Result<()> {
                             anim_request = anim_list.iter().position(|(l, _)| l.contains(want.as_str())).map(Some);
                         }
                     }
+                    if let (Some(name), Some(s)) = (look_bone.take(), skel.as_ref()) {
+                        look_at_bone(&mut camera, &mut control, s, &name);
+                    }
                     current = Some(build(&context, p.model, p.baked, p.warnings, shading, normal_maps));
                     error = None;
                 }
@@ -1233,6 +1389,12 @@ fn main() -> Result<()> {
                     skel = None;
                     skel_gm = None;
                     demo = None;
+                    char_motion = None;
+                    anim_list.clear();
+                    anim = None;
+                    anim_index = None;
+                    blend = None;
+                    blend_index = None;
                     error = Some(format!("{e:#}"));
                 }
             }
@@ -1241,6 +1403,34 @@ fn main() -> Result<()> {
             rebuild = false;
             if let Some(c) = current.take() {
                 current = Some(build(&context, c.model, c.baked, c.warnings, shading, normal_maps));
+            }
+        }
+
+        // A body type picked last frame: list its clips, and keep playing the same clips where it has them.
+        if let Some(body) = body_request.take()
+            && let Some(cm) = char_motion.as_mut()
+            && cm.body != body
+        {
+            let label_of = |i: Option<usize>| i.and_then(|i| anim_list.get(i)).map(|(l, _)| l.clone());
+            let (playing_label, blend_label) = (label_of(anim_index), label_of(blend_index));
+            cm.body = body;
+            anim_list = motion::clips(arc, &cm.found, cm.body.as_deref());
+            let find = |l: &Option<String>| l.as_ref().and_then(|l| anim_list.iter().position(|(x, _)| x == l));
+            // the old indices point into the old list
+            anim_index = None;
+            blend_index = None;
+            if playing_label.is_some() {
+                anim_request = Some(find(&playing_label));
+            }
+            if blend_label.is_some() {
+                blend_request = Some(find(&blend_label));
+            }
+            if demo.is_some()
+                && let Some(c) = &current
+            {
+                let (d, f) = start_demo(&context, arc, &anim_list, skel.as_ref(), &c.model);
+                demo = Some(d);
+                demo_floor = Some(f);
             }
         }
 
@@ -1560,6 +1750,39 @@ fn main() -> Result<()> {
 
                     ui.separator();
                     ui.heading("Animation");
+                    if let Some(cm) = &char_motion {
+                        let name = |b: &Option<String>| b.clone().unwrap_or_else(|| "own clips".to_string());
+                        ui.horizontal(|ui| {
+                            ui.label("Body motions");
+                            egui::ComboBox::from_id_salt("body")
+                                .selected_text(name(&cm.body))
+                                .height(400.0)
+                                .show_ui(ui, |ui| {
+                                    if cm.found.own.is_some()
+                                        && ui.selectable_label(cm.body.is_none(), "own clips").clicked()
+                                    {
+                                        body_request = Some(None);
+                                    }
+                                    for b in &motions.bodies {
+                                        if ui.selectable_label(cm.body.as_ref() == Some(b), b).clicked() {
+                                            body_request = Some(Some(b.clone()));
+                                        }
+                                    }
+                                })
+                                .response
+                                .on_hover_text(
+                                    "Trainers and NPCs share 25 body types of motions (kid, adult m/f, and styles);                                      many trainers also have their own clips. Any type plays on any of them.",
+                                );
+                        });
+                        let note = match (&cm.body, &cm.found.named_body) {
+                            (None, _) => "Its own clips.".to_string(),
+                            (Some(b), Some(n)) if b == n => "The body type its files name.".to_string(),
+                            (Some(_), _) if cm.found.own.is_some() => "Another body type than its own clips.".to_string(),
+                            _ => "No own clips: body type guessed from the name.".to_string(),
+                        };
+                        let extra = cm.found.extra.len();
+                        ui.small(if extra > 0 { format!("{note} Plus {extra} special clips of its own.") } else { note });
+                    }
                     if demo.is_some() {
                         ui.small("Controlled by play mode.");
                     } else if anim_list.is_empty() {

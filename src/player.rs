@@ -189,15 +189,27 @@ pub struct Assembled {
     pub warnings: Vec<String>,
 }
 
-/// Loads the parts and puts them on one skeleton. Material names get the part's file name in front
+/// Loads the player's parts and puts them on the player's base skeleton (see `assemble_on`).
+pub fn assemble(ar: &mut Archive, paths: &[&str], lod: usize) -> Result<Assembled> {
+    assemble_on(ar, BASE_SKELETON, "player", paths, lod)
+}
+
+/// Loads the parts and puts them on one skeleton, the base skeleton at `base` (the player's p0_base.trskl, or
+/// cc_base.trskl for the NPC parts in chara/model_vr). Material names get the part's file name in front
 /// ("p0_hrs0000_00_hrs00/hair") so parts with the same material names stay apart; each part's textures are
 /// resolved from its own folder. A part that fails to load becomes a warning.
-pub fn assemble(ar: &mut Archive, paths: &[&str], lod: usize) -> Result<Assembled> {
-    let mut skeleton = skeleton::parse(&ar.read(BASE_SKELETON)?, BASE_SKELETON)?;
+pub fn assemble_on(
+    ar: &mut Archive,
+    base: &str,
+    name: &str,
+    paths: &[&str],
+    lod: usize,
+) -> Result<Assembled> {
+    let mut skeleton = skeleton::parse(&ar.read(base)?, base)?;
     let mut warnings = Vec::new();
     let mut baked = HashMap::new();
     let mut model = Model {
-        path: "player".to_string(),
+        path: name.to_string(),
         dir: String::new(),
         materials: HashMap::new(),
         mesh_file: format!("{} parts", paths.len()),
