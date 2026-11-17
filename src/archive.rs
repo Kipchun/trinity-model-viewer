@@ -46,6 +46,63 @@ fn locate(picked: &Path) -> Result<Layout> {
     )
 }
 
+/// A file of the RomFS outside the Trinity archive (e.g. `audio/wwise/bin/Switch/Stream.pck`), opened read-only:
+/// in a dumped folder it is a file of its own; in an image it is a byte range of `romfs.bin` (from `index.json`).
+pub struct RomFile {
+    file: File,
+    base: u64,
+    pub size: u64,
+}
+
+impl RomFile {
+    /// Opens `rel` (a path from the RomFS root) of the RomFS in or near `picked` (see `locate`).
+    pub fn open(picked: &Path, rel: &str) -> Result<RomFile> {
+        match locate(picked)? {
+            Layout::Folder { trpfd, .. } => {
+                let root = trpfd
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or_else(|| anyhow!("no RomFS root above {}", trpfd.display()))?;
+                let path = root.join(rel);
+                let file =
+                    File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+                let size = file.metadata()?.len();
+                Ok(RomFile {
+                    file,
+                    base: 0,
+                    size,
+                })
+            }
+            Layout::Image { image, index } => {
+                let index: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&index)
+                        .with_context(|| format!("reading {}", index.display()))?,
+                )?;
+                let e = index["files"]
+                    .as_array()
+                    .and_then(|v| v.iter().find(|e| e["path"] == rel))
+                    .ok_or_else(|| anyhow!("{rel} is not in index.json"))?;
+                let file =
+                    File::open(&image).with_context(|| format!("opening {}", image.display()))?;
+                Ok(RomFile {
+                    file,
+                    base: e["offset"].as_u64().unwrap_or(0),
+                    size: e["size"].as_u64().unwrap_or(0),
+                })
+            }
+        }
+    }
+
+    /// `n` bytes at `off`, cut short at the end of the file.
+    pub fn read_at(&mut self, off: u64, n: usize) -> Result<Vec<u8>> {
+        if off > self.size {
+            bail!("offset {off} past the end ({} bytes)", self.size);
+        }
+        let n = n.min((self.size - off) as usize);
+        read_at(&mut self.file, self.base + off, n)
+    }
+}
+
 pub fn fnv1a64(s: &str) -> u64 {
     let mut h: u64 = 0xCBF29CE484222645;
     for b in s.bytes() {
@@ -210,8 +267,18 @@ impl Archive {
             .file_pack
             .get(&fnv1a64(path))
             .ok_or_else(|| anyhow!("{path}: not in the archive"))?;
+        self.pack_files_at(pi)
+    }
+
+    /// Path hashes of every file in pack `pi` (an index into `pack_names`).
+    pub fn pack_files_at(&mut self, pi: u32) -> Result<Vec<u64>> {
         let pack = self.pack(pi)?;
         Table::root(pack, 0)?.u64s(0)
+    }
+
+    /// Index of the pack that holds the file whose path hashes to `h`.
+    pub fn pack_of(&self, h: u64) -> Option<u32> {
+        self.file_pack.get(&h).copied()
     }
 
     /// Paths of every Pokémon model (pokemon/data/pmNNNN/pmNNNN_FF_VV/pmNNNN_FF_VV.trmdl) found in the archive.

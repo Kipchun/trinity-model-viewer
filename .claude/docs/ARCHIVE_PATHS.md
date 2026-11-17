@@ -26,11 +26,22 @@ example path shown; the others are inferred and need a check.
 | `field_graphicterrain_model` | `field_graphic/terrain_model/plants_me_tree_pine03/plants_me_tree_pine03.trmdl` | objects, plants, ground | confirmed |
 | `field_graphicterrainterrain_` | `field_graphic/terrain/terrain_00_00/ter_00_00.trtrr` | overworld terrain tiles | confirmed |
 | `field_graphiccommon_model` | `field_graphic/common_model/a_t01_i01/a_t01_i01.trmdl` | interiors and furniture | confirmed |
-| `field_graphicterrain_clod` | `field_graphic/terrain_clod/...` | coarse LOD terrain, towns | inferred (first guess failed) |
 | `field_graphicterrain_env` | `field_graphic/terrain_env/...` | per-tile lighting (`envter_*.trlgt`) | inferred |
 | `field_graphic{glb,tr,common}_share_tex` | `field_graphic/<x>_share_tex/...` | shared field textures | inferred |
+| `field_graphicterrain_clod` (confirmed) | `field_graphic/terrain_clod/clod_town_c02_clod000/clod_town_c02_clod000.trmdl` | coarse LOD meshes: `clod_town_<tNN/cNN>_clod###` / `_clod_far###`, `clod_terrain_XX_YY_clod###_<what>` (XX up to 23: grid codes beyond the 10 x 10 tiles?), `clod_c01_both_01_*`. Centred on their origin: need placements | confirmed |
+| `worldscenepartsfieldunity_output` | `world/scene/parts/field/unity_output/town_t07_field_streaming_s_/ins_root_plants_un_garden_tulip01_yellow_007_X00_Z00.trins` | overworld streaming instances: one pack of 2405 `.trins`; the scenes beside them name 1560 (`<scene>_/ins_root_<model>_<NNN>_X00_Z00.trins`, also `ins_clod000_...`) | confirmed |
+| (no pack name) | `world/scene/parts/field/world_resident/outdoor_resident_/outdoor_resident_0.trscn`, `world/scene/parts/field/world_resident_/world_resident_0.trscn`, `unity_output_1/dlc1_resident_/dlc1_resident_0.trscn`, `unity_output_2/dlc2_resident_/dlc2_resident_0.trscn` | resident scenes (water, outer scenery, the Terarium dome); found from `SubScene` references, confirmed by hash. `unity_output/town_c01_field_resident_`, `unity_output/c01_both_01_field_resident_` too. ~100 `ter_XX_YY_resident` scenes place nothing | confirmed |
+| (no pack name) | `world/scene/parts/field/unity_output_1/ter_12_02_streaming_m_/ter_12_02_streaming_m_0.trscn` | DLC maps' streamed scenes: `unity_output_1` Kitakami (tiles 10-13), `unity_output_2` Terarium (20-23); sizes s/m/l/xl | confirmed |
+| `worldscenepartsfieldroom` | `world/scene/parts/field/room/a_c01_hairsalon_/a_c01_hairsalon_0.trscn`, `room/battlebg_normal_c01_/...`, `room/clubroom/clubroom_02_obj_/...`, `room/interior_common/...` | 151 room scenes (`maps::rooms` recovers them from pack names); made of `SubScene`s (`<code>_obj`, `_camera`, `_event`, `_scenario`, `_area_col`) | confirmed |
+| (no pack name) | `world/scene/parts/field/unity_output/town_t07_field_streaming_s_/town_t07_field_streaming_s_0.trscn` | the streamed scenes: `<name>_/<name>_0.trscn` (+ an identical `_1`). Families in `scene.rs` (`area_scenes`, `tile_scenes`); all names readable from the two scene packs (`probe --scene-packs`) | confirmed |
+| `field_graphicterrainterrain_` (`.trins`) | `field_graphic/terrain/terrain_02_03/ter_02_03_plants_me_tree_oak03_X0Z0_d0.trins` | a tile's trees, listed in its `.trtrr` | confirmed |
 | `worldscenepartsfieldroom` | `world/scene/parts/field/room/a_c01_hairsalon_/a_c01_hairsalon_0.trscn` | room scenes | confirmed |
 | `worldscenepartsevent` | `world/scene/parts/event/...` | event scenes (`.trsog`) | inferred |
+| `applitex` | `appli/tex/icon_item/item_0183/item_0183.bntx`, `appli/tex/icon_type/tga_jpn/...` | UI textures (icons, map pictures, menus); one pack holds a whole set (562 item icons), named after one | confirmed |
+| `applidata` | `appli/data/bag/state_bag_00.truis`, `appli/data/btl_dan/view_btl_dan_rush_ko_00.truiv` | UI layouts ("UikitBody" FlatBuffers, no textures) | confirmed |
+| `demoapplipokedex` | `demo/appli/pokedex/zk0000_00/pokedex_capture_thum_001.bntx` | Pokédex pictures and the Pokédex scene model | confirmed |
+| `pokemondata` (icons) | `pokemon/data/pm0001/pm0001_00_00/icon/pm0001_00_00_00.bntx` | Pokémon menu icons | confirmed |
+| (all `.bntx`) | | `textures::catalogue` rebuilds all 4984 `.bntx` pack names (2026-11-16) | confirmed |
 | `envfel` | `env/fel/fel_a_com_hairsalon01/fel_a_com_hairsalon01.trlgt` | room lighting, specular probes | confirmed |
 
 Gotchas found while confirming:
@@ -54,7 +65,8 @@ Gotchas found while confirming:
 - `a_com_*`: shared interiors (houses, buildings, hair salon, sandwich shop, `nushi`).
 - `a_raid_<type>`: Tera raid arenas, one per type (Japanese type names: `honoo` fire, `mizu` water, ...).
 - `a_plNN`: unknown; `a_w23_*`, `area23`: DLC area interiors and caves; `pi_*`: picnic.
-- `terrain_XX_YY`: overworld grid tiles; `clod_town_tNN`: town LOD meshes.
+- `terrain_XX_YY`: overworld grid tiles; `clod_town_tNN` / `cNN`: town LOD meshes (t01-t10, c02, c03_01-03 seen).
+- Pack names of the town streaming scenes: only one exists. Rebuild others with `probe --split` / `--guess-ins`.
 - **Area Zero**: not identified yet.
 
 ## Character codes seen

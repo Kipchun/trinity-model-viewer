@@ -1,0 +1,8 @@
+{
+  "name": "trinity-model-viewer",
+  "engine": "generic",
+  "launch": { "cmd": "target/release/trinity-model-viewer.exe", "args": ["--sound", "music"] },
+  "log": { "stdout": true },
+  "window": "Trinity Model Viewer",
+  "sourceRoots": ["src"]
+}

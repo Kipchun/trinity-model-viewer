@@ -1,4 +1,9 @@
-//! Materials of the model view: three-d's physical material, or the eye material for Pokémon eyes.
+//! Materials of the model view: three-d's physical material, the same with an alpha cut-out, or the eye material
+//! for Pokémon eyes.
+//!
+//! Cut-outs (leaves, hair, lashes, tree billboards): three-d 0.19's forward `PhysicalMaterial` takes no
+//! `alpha_cutout` (only the deferred one does), though its shader has the discard under `ALPHACUT`.
+//! `ModelMaterial::Cutout` defines it, with the threshold as a uniform.
 //!
 //! Pokémon eyes ("Eye", "EyeClearCoat" shaders; see `materials::Eye`) get their shine from a highlight on the clear
 //! coat; the eye material draws it over the layered colour (shader `shaders/eye.frag`) as a white spot reflected
@@ -68,27 +73,64 @@ impl Material for EyeMaterial {
 #[derive(Clone)]
 pub enum ModelMaterial {
     Physical(Box<PhysicalMaterial>),
+    /// Pixels whose colour texture's alpha is below the threshold are dropped.
+    Cutout(Box<PhysicalMaterial>, f32),
     Eye(EyeMaterial),
 }
 
 impl ModelMaterial {
     fn inner(&self) -> &dyn Material {
         match self {
-            ModelMaterial::Physical(m) => m.as_ref(),
+            ModelMaterial::Physical(m) | ModelMaterial::Cutout(m, _) => m.as_ref(),
             ModelMaterial::Eye(m) => m,
+        }
+    }
+
+    /// A physical material, cut out at `cutout` when given.
+    pub fn physical(m: PhysicalMaterial, cutout: Option<f32>) -> ModelMaterial {
+        match cutout {
+            Some(t) if m.albedo_texture.is_some() => ModelMaterial::Cutout(Box::new(m), t),
+            _ => ModelMaterial::Physical(Box::new(m)),
         }
     }
 }
 
 impl Material for ModelMaterial {
     fn fragment_shader_source(&self, lights: &[&dyn Light]) -> String {
-        self.inner().fragment_shader_source(lights)
+        let source = self.inner().fragment_shader_source(lights);
+        match self {
+            ModelMaterial::Cutout(..) => format!(
+                "#define ALPHACUT;
+uniform float acut;
+{source}"
+            ),
+            _ => source,
+        }
     }
     fn id(&self) -> EffectMaterialId {
-        self.inner().id()
+        match self {
+            // public-use range; one id per texture combination, as the physical shader differs by them
+            ModelMaterial::Cutout(m, _) => {
+                let bits = [
+                    m.albedo_texture.is_some(),
+                    m.metallic_roughness_texture.is_some(),
+                    m.occlusion_texture.is_some(),
+                    m.normal_texture.is_some(),
+                    m.emissive_texture.is_some(),
+                ]
+                .iter()
+                .enumerate()
+                .fold(0u16, |acc, (i, b)| acc | ((*b as u16) << i));
+                EffectMaterialId(0x0200 | bits)
+            }
+            _ => self.inner().id(),
+        }
     }
     fn use_uniforms(&self, program: &Program, viewer: &dyn Viewer, lights: &[&dyn Light]) {
-        self.inner().use_uniforms(program, viewer, lights)
+        self.inner().use_uniforms(program, viewer, lights);
+        if let ModelMaterial::Cutout(_, t) = self {
+            program.use_uniform("acut", *t);
+        }
     }
     fn render_states(&self) -> RenderStates {
         self.inner().render_states()

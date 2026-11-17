@@ -8,12 +8,16 @@ The field layouts of read formats live in the doc comment at the top of each sou
 | --- | ---: | --- | --- | --- |
 | `.trpfd` / `.trpfs` | 1 / 1 | read | archive file table / packs | `archive.rs` |
 | `.trpak` | 23,586 | read | one pack (FlatBuffers, Kraken per file) | `archive.rs` |
-| `.trmdl` | 2,389 | read (Pokémon, trainers, props) | model: meshes, skeleton, materials, LODs. All 264 trainer/prop models load with no warnings; player-base models have no meshes | `model.rs` |
+| `.trmdl` | 2,389 | read (Pokémon, trainers, props, field models with LODs: slot 1 = mesh files per LOD, slot 4 = `{0: [LOD index], 1: "Custom"}`) | model: meshes, skeleton, materials, LODs. All 264 trainer/prop models load with no warnings; player-base models have no meshes | `model.rs` |
 | `.trmsh` | — | read | mesh shapes, vertex layouts | `model.rs` |
 | `.trmbf` | 281 | read | vertex and index buffers | `model.rs` |
 | `.trmtr` | 19 | read | materials: textures, float/float4 params, shader name + switches (`EnableAlphaTest`, ...), render type (`Opaque`, `Blend`, `BlendPreMultiAlpha`, `Add`, `Mul`); `probe --transparency` surveys them | `model.rs`, `materials.rs` |
 | `.trmmt` | 23 | unknown | material sets / variants (guess: alt colours, outfit variants) | |
-| `.bntx` | 4,984 | read (first mip, any array layer; RGBA32F for the splat params) | textures | `texture.rs` |
+| `.bnk` (Wwise) | 16 (RomFS `audio/wwise/bin/Switch/`, outside the archive) | read: DIDX/DATA media, HIRC Sound (2) and Music track (11) sources; bank version 140 | sound banks | `wwise.rs` |
+| `.pck` (Wwise AKPK) | 5 (Stream, SDC0, SDC2 hold files; LooseMedia, Patch00 empty) | read: stream table | streamed sounds | `wwise.rs` |
+| message `.tbl` / `.dat` | ~9000 packs (`message/dat/<language>/...`) | read: AHTB labels, XOR-rotated UTF-16 lines | game text | `msg.rs` |
+| `.wem` | 17,512 (+ 74 rumble in VIB.bnk, left out) | decoded: PTADPCM 13,261, Vorbis 3,883, Opus NX 329, PCM 39; all decode (`probe --audio decode`) | music, sound effects | `wem.rs` |
+| `.bntx` | 4,984 | read (first mip, any array layer; RGBA16F/RGBA32F clamped for display); name at BRTI 0x60. 36,478 in the packs named by `.bntx` and the model packs, all decode (`probe --textures decode`) | textures, UI sprites | `texture.rs`, `textures.rs` |
 | `.trskl` | 159 | read | skeletons. Player parts: slot 4 = joint offset in the player's shared joint list, node slot 6 = base bone to hang from (all 208 parts attach cleanly) | `skeleton.rs` |
 | `.tranm` | 162 | read | skeletal animation | `anim.rs` |
 | `.tracr` | 95 | partial (`_base.tracr`) | animation list of a model; the player's is `chara/motion_pc/base/p0_base.tracr` (727 clips); trainers' in `chara/motion_cc_base/` and `motion_uq/` (see `motion.rs`); `motion_tr/.../<code>_00_head00.tracr` lists face clips | `anim.rs`, `motion.rs` |
@@ -24,15 +28,17 @@ The field layouts of read formats live in the doc comment at the top of each sou
 | `.trcma` | 64 | unknown | | |
 | `.trtml` | 267 | unknown | guess: timeline | |
 | `.trpokecfg` | 100 | unknown | per-Pokémon config | |
-| `.trscn` | 153 | unknown | scene: object placement (rooms, battle backgrounds) | |
+| `.trmsh` vertex colour | - | read | semantic 5, RGBA8 (format 20); water uses a = opacity, r = foam. See `model.rs` for all semantics/formats | `model.rs` |
+| `.trmtr` shader "Water" | 1 + 21 + 6 parts | approximated | BaseColor, NormalMap/NormalMap1 (BC5) with UVScaleOffset(1)/ScrollUVSpeed(1), FoamMaskMap (BC4), FoamColor, Foam*; FlowMap 1x1 on rivers. `probe --water` | `water.rs` |
+| `.trscn` | 153 (thousands unnamed) | partial | scene: tree of typed nodes `{0: type, 1: [u8] data (FlatBuffer), 2: children}`. Read: SceneObject / ObjectTemplate transforms, ModelComponent model paths, ModelInstancerComponent `.trins` paths. `SubScene` {0: relative path; stored as `<name>_0.trscn`} composes scenes (rooms, resident scenes); `.trsog` references (events) are skipped. All 579 streamed scenes of the three maps and 156 resident/room scenes load (`--check`, `probe --rooms`) | `scene.rs` |
 | `.trsog` | 2 | unknown | scene object group | |
 | `.trsot` | 959 | unknown | guess: scene object template | |
-| `.trins` | 99 | unknown | guess: instances | |
+| `.trins` | 99 (many more unnamed) | read | `SrtInstanceBuffer`: instance count + 4x4 column-major matrices, no model name (the lister names it). Terrain trees: 311 files, 3509 instances, all parse; town streaming pack: 2405 files, 25,000 instances, all parse | `instances.rs` |
 | `.trspb` | 127 | unknown | | |
 | `.trslp` | 65 | unknown | | |
-| `.trtrr` | 38 (100 files) | partial | terrain tile header (`terrain_XX_YY/ter_XX_YY`): names `ter_XX_YY.trmtr`, `_detailmap_N.trtbf`, grass models. Its pack also holds the **height file** (name unknown, found by shape): 513 x 513 f32 heights, origin, scale, splat and grass names. All 100 tiles parse (`probe --terrain`) | `terrain.rs` |
-| terrain `.trmtr` | — | read | `ter_XX_YY.trmtr`: "Terrain" shader; splat control map (R/G two layer indices, B/A weights), shared 60-layer colour and normal arrays, per-layer tiling (5 m) in `global_splatST_params` | `terrain.rs`, `shaders/terrain.frag` |
-| `.trtbf` | 2 | unknown | terrain detail map, 1024 x 1024 x 4 bytes (+72 header), FlatBuffer | |
+| `.trtrr` | 38 (100 files) | partial | terrain tile header (`terrain_XX_YY/ter_XX_YY`): slot 4 tree models + their `.trins` (all 100 read), slot 6 grass models + parameters. Its pack also holds the **height file** (name unknown, found by shape): 513 x 513 f32 heights, origin, scale, grass names + per-cell grass bit masks, splat names. All 100 tiles parse (`probe --terrain`). `_heightmap.bntx` (R16) = the same heights | `terrain.rs` |
+| terrain `.trmtr` | — | read | `ter_XX_YY.trmtr`: "Terrain" shader; splat control map (R/G two layer indices, B/A weights), shared 60-layer colour and normal arrays (both drawn), per-layer tiling (5 m) and flags in `global_splatST_params`; triplanar off in all 100 | `terrain.rs`, `shaders/terrain.frag` |
+| `.trtbf` | 2 | unknown | terrain detail map, FlatBuffer {0: {1: 1024, 2: 1024, 5: 4194304 bytes}}: 1024² x 4 channels of 0/255 masks, mostly empty; not grass cover (weak link to the splat layers) | |
 | `.trlgt` | 358 | unknown | lighting per room / terrain tile | |
 | `.trcol` | 19 | unknown | collision: Havok packfile (`TAG0`, `SDKV`), e.g. `ter_XX_YY.trcol` | |
 | `.trbsm` | 10 | unknown | | |

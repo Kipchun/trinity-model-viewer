@@ -99,6 +99,21 @@ pub struct Input {
     pub jump: bool,
 }
 
+/// What the character stands on: the ground height under a point, `None` where there is none (a hole, off the
+/// map). See PLAY_IN_SCENES_PLAN.md, step S0.
+pub trait Ground {
+    fn height(&self, x: f32, z: f32) -> Option<f32>;
+}
+
+/// The checker floor: flat at y = 0 everywhere.
+pub struct FlatGround;
+
+impl Ground for FlatGround {
+    fn height(&self, _x: f32, _z: f32) -> Option<f32> {
+        Some(0.0)
+    }
+}
+
 pub struct Demo {
     pub clips: [Option<Clip>; ROLES],
     pub labels: [Option<String>; ROLES],
@@ -117,6 +132,9 @@ pub struct Demo {
     pub measured: bool,
     jump_speed: f32,
     gravity: f32,
+    /// Highest rise the character walks up without jumping, and the deepest drop it follows down a slope
+    /// before falling: about a third of its radius (stairs, kerbs), at least 0.3 m.
+    step: f32,
     /// Shared cycle position of walk and run, 0 to 1.
     phase: f32,
     /// Weights of idle, walk and run in the last ground pose, for the panel.
@@ -173,6 +191,7 @@ impl Demo {
             run_speed,
             measured,
             jump_speed: gravity * t,
+            step: (radius * 0.35).max(0.3),
             gravity,
             phase: 0.0,
             weights: [1.0, 0.0, 0.0],
@@ -204,7 +223,7 @@ impl Demo {
             .map(|p| (p, 0.0, len));
     }
 
-    /// Moves the character and returns the pose for this frame (`None` without a skeleton).
+    /// Moves the character over `ground` and returns the pose for this frame (`None` without a skeleton).
     /// `camera_forward` is the view direction; movement keys are relative to it.
     pub fn update(
         &mut self,
@@ -213,6 +232,7 @@ impl Demo {
         camera_forward: Vec3,
         skel: Option<&Skeleton>,
         crossfade: f32,
+        ground: &dyn Ground,
     ) -> Option<Vec<Local>> {
         let dt = dt.min(0.1);
         self.state_time += dt;
@@ -258,7 +278,25 @@ impl Demo {
             let rate = if target_speed > self.speed { 2.5 } else { 4.0 } * self.run_speed * control;
             self.speed += (target_speed - self.speed).clamp(-rate * dt, rate * dt);
         }
+        let before = self.pos;
         self.pos += vec3(self.yaw.sin(), 0.0, self.yaw.cos()) * self.speed * dt;
+        let under = ground.height(self.pos.x, self.pos.z);
+        if !airborne {
+            match under {
+                // a rise higher than a step is a wall: stay where we were
+                Some(h) if h > before.y + self.step => {
+                    self.pos = before;
+                    self.speed = 0.0;
+                }
+                // up a step or a slope, or down one within a step: follow the ground
+                Some(h) if h >= before.y - self.step => self.pos.y = h,
+                // a ledge or a hole: fall
+                _ => {
+                    self.vy = 0.0;
+                    self.enter(State::FallStart, crossfade);
+                }
+            }
+        }
 
         // The clip of the current state; `done` when a clip that plays once has reached its end.
         let mut done = true;
@@ -284,8 +322,9 @@ impl Demo {
             State::Rising | State::FallStart | State::Falling => {
                 self.vy -= self.gravity * dt;
                 self.pos.y += self.vy * dt;
-                if self.pos.y <= 0.0 && self.vy < 0.0 {
-                    self.pos.y = 0.0;
+                let floor = under.unwrap_or(f32::MIN);
+                if self.pos.y <= floor && self.vy < 0.0 {
+                    self.pos.y = floor;
                     self.vy = 0.0;
                     self.enter(State::Landing, crossfade);
                 } else if self.state == State::Rising && self.vy <= 0.0 {

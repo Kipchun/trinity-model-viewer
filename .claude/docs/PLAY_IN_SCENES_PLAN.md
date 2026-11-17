@@ -3,7 +3,9 @@
 Goal: in play mode (F7), pick a place (a room, a town, a stretch of the overworld) and run a Pokémon or a human
 character around in it: walking on the floor, up slopes and steps, against walls, off ledges and back down.
 
-Status: planned (2026-11-15). Nothing written yet.
+Status: planned (2026-11-15). 2026-11-16: S0 done (`demo::Ground`, `FlatGround`; `Demo::update` follows slopes and
+steps, stops at walls, falls off ledges, lands on the ground height). Terrain ground for S7 written
+(`world::TerrainGround`, bilinear over the heightfield, used by the World panel); play mode in the World tab not yet.
 
 ## Where play mode is today
 

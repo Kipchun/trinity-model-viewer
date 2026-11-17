@@ -38,7 +38,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libgtk-3-dev libx11-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libasound2-dev libopus-dev
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   test:
@@ -53,7 +54,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libgtk-3-dev libx11-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libasound2-dev libopus-dev
       # No doc-test step: doc tests only run for library targets and this package has binaries only.
       - name: Run tests without game assets
         run: cargo test --locked --all-targets --all-features
@@ -76,7 +78,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libgtk-3-dev libx11-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev
+            libwayland-dev libgl1-mesa-dev libegl1-mesa-dev \
+            libasound2-dev libopus-dev
       - name: Build both binaries
         shell: bash
         run: |

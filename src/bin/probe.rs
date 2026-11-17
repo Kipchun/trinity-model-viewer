@@ -13,6 +13,21 @@
 //!   cargo run --release --bin probe -- --pack <path> [names]  every file in that path's pack (hash, size, head)
 //!   cargo run --release --bin probe -- --save <path|#hash> <out>  raw file bytes, for study (keep out of the repo)
 //!   cargo run --release --bin probe -- --terrain              load every overworld tile's heights, check seams
+//!   cargo run --release --bin probe -- --heightmap <XX_YY>      a tile's R16 heightmap vs. its height file, hole edges
+//!   cargo run --release --bin probe -- --lod-survey           LOD data of placed models: ModelComponent slots, trmdl slot 4
+//!   cargo run --release --bin probe -- --scene-packs [model]   every scene in the field scenes' packs; which place [model]
+//!   cargo run --release --bin probe -- --town-scenes          every town scene: placements, models, instance files
+//!   cargo run --release --bin probe -- --scene-tree <trscn> [n]  objects, transforms, models, instance files
+//!   cargo run --release --bin probe -- --scene <trscn> [n] [kind]  node kinds, then n nodes with their data's slots
+//!   cargo run --release --bin probe -- --tile-instances       every tile's tree instance files and their models
+//!   cargo run --release --bin probe -- --guess-ins <path> <stems file> <dir,dir>  name a pack's .trins by brute force
+//!   cargo run --release --bin probe -- --instances <path>     every file of that pack as instances, vs. the ground
+//!   cargo run --release --bin probe -- --pack-survey <path>   a pack's files grouped by kind
+//!   cargo run --release --bin probe -- --split <prefix/> <rest>  find the slashes of a pack name's path (up to 3)
+//!   cargo run --release --bin probe -- --grass-cells <XX_YY>   height file slots 12/13 (grass?) vs. splat layers
+//!   cargo run --release --bin probe -- --terrain-materials    switches of every tile material, splat params per layer
+//!   cargo run --release --bin probe -- --hole-regions        sea vs. inland holes over the stitched map, their edges
+//!   cargo run --release --bin probe -- --holes              heights next to holes (skirts?), every tile
 //!   cargo run --release --bin probe -- --texture <bntx> <layer> <out>  decoded RGBA8 of one layer (raw, for study)
 //!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
 //!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
@@ -20,6 +35,17 @@
 //!   cargo run --release --bin probe -- --material <trmdl> <name part>  every field of the matching materials
 //!   cargo run --release --bin probe -- --eyes                  Eye / EyeClearCoat materials: highlight switches and values
 //!   cargo run --release --bin probe -- --transparency          shader, render type and alpha switches of every material
+//!   cargo run --release --bin probe -- --map-tiles             every terrain tile of every grid: origin, size, height range
+//!   cargo run --release --bin probe -- --rooms                 every room scene found from the pack names: sub-scenes, models
+//!   cargo run --release --bin probe -- --water                 the overworld's water parts vs. the ground under them
+//!   cargo run --release --bin probe -- --textures [expand|decode]  the Textures tab's catalogue: groups, folders,
+//!                                                     paths not rebuilt; expand: every folder's other pack files;
+//!                                                     decode: also decode every texture and count failures
+//!   cargo run --release --bin probe -- --audio [names|decode [N]]  the Wwise sounds: groups, codecs, durations;
+//!                                                     names: every name found; decode:
+//!                                                     decode every Nth sound (default all), count failures
+//!   cargo run --release --bin probe -- --grep <text> [pack filter]  files containing <text> (ASCII or UTF-16), in
+//!                                                     the packs whose name contains [pack filter] (default all)
 //!   cargo run --release --bin probe -- --trainer-anims         every human model: own clip list, named and best-fit body type
 #[path = "../anim.rs"]
 mod anim;
@@ -29,20 +55,36 @@ mod archive;
 mod config;
 #[path = "../fb.rs"]
 mod fb;
+#[path = "../instances.rs"]
+mod instances;
+#[path = "../maps.rs"]
+mod maps;
 #[path = "../materials.rs"]
 mod materials;
 #[path = "../model.rs"]
 mod model;
 #[path = "../motion.rs"]
 mod motion;
+#[path = "../msg.rs"]
+mod msg;
 #[path = "../player.rs"]
 mod player;
+#[path = "../scene.rs"]
+mod scene;
 #[path = "../skeleton.rs"]
 mod skeleton;
+#[path = "../sound_names.rs"]
+mod sound_names;
 #[path = "../terrain.rs"]
 mod terrain;
 #[path = "../texture.rs"]
 mod texture;
+#[path = "../textures.rs"]
+mod textures;
+#[path = "../wem.rs"]
+mod wem;
+#[path = "../wwise.rs"]
+mod wwise;
 
 use fb::{Table, u32_at};
 
@@ -54,7 +96,7 @@ fn dump(t: &Table, depth: usize, max_depth: usize) {
         let mut line = format!("{pad}[{i}] u32={raw} f32={:.4}", f32::from_bits(raw));
         if let Ok(Some(s)) = t.string(i)
             && !s.is_empty()
-            && s.len() < 100
+            && s.len() < 260
             && s.chars().all(|c| c.is_ascii_graphic())
         {
             line += &format!(" str={s:?}");
@@ -193,7 +235,12 @@ fn player_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
 /// Loads one model the way the viewer does (mesh, skeleton, baked materials) and prints counts and every warning.
 fn load_report(ar: &mut archive::Archive, path: &str) {
     println!("== {path}");
-    let m = match model::load(ar, path, 0) {
+    // "path@N" loads LOD N
+    let (path, lod) = match path.rsplit_once('@') {
+        Some((p, l)) => (p, l.parse().unwrap_or(0)),
+        None => (path, 0),
+    };
+    let m = match model::load(ar, path, lod) {
         Ok(m) => m,
         Err(e) => {
             println!("  FAIL model: {e:#}");
@@ -211,6 +258,7 @@ fn load_report(ar: &mut archive::Archive, path: &str) {
         m.max[1] - m.min[1],
         m.max[2] - m.min[2],
     );
+    println!("  bounds {:?} .. {:?}", m.min, m.max);
     match &m.skeleton_file {
         Some(f) => match skeleton::load(ar, &m.dir, f) {
             Ok(s) => {
@@ -238,8 +286,36 @@ fn load_report(ar: &mut archive::Archive, path: &str) {
         "  materials: {textured} of {} with a colour texture",
         baked.len()
     );
+    let mut names: Vec<_> = baked.keys().collect();
+    names.sort();
+    for n in names {
+        let b = &baked[n];
+        println!(
+            "  baked {n}: alpha {:?}, albedo {}",
+            b.alpha,
+            b.albedo.as_ref().map_or("none".to_string(), |a| format!(
+                "{}x{} {}{}",
+                a.width,
+                a.height,
+                a.format,
+                if a.has_alpha() { " with alpha" } else { "" }
+            ))
+        );
+    }
     for w in &warnings {
         println!("  warn {w}");
+    }
+    for sm in &m.submeshes {
+        println!(
+            "  part {:?}: material {:?} ({}), {} triangles, uvs {}",
+            sm.shape,
+            sm.material,
+            m.materials
+                .get(&sm.material)
+                .map_or("NOT IN THE MODEL", |x| x.shader.as_str()),
+            sm.indices.len() / 3,
+            sm.uvs.is_some()
+        );
     }
     for (name, mat) in &m.materials {
         println!(
@@ -302,8 +378,65 @@ fn main() -> anyhow::Result<()> {
         println!("{} bytes", b.len());
         return Ok(());
     }
+    if args[0] == "--rooms" {
+        return rooms_check(&mut ar);
+    }
+    if args[0] == "--map-tiles" {
+        return map_tiles(&mut ar);
+    }
+    if args[0] == "--water" {
+        return water_check(&mut ar);
+    }
     if args[0] == "--terrain" {
         return terrain_check(&mut ar);
+    }
+    if args[0] == "--heightmap" {
+        return heightmap_check(&mut ar, &args[1]);
+    }
+    if args[0] == "--lod-survey" {
+        return lod_survey(&mut ar);
+    }
+    if args[0] == "--scene-packs" {
+        return scene_packs(&mut ar, args.get(1).map_or("", String::as_str));
+    }
+    if args[0] == "--town-scenes" {
+        return town_scenes_check(&mut ar);
+    }
+    if args[0] == "--scene-tree" {
+        let limit = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(80);
+        return scene_tree(&mut ar, &args[1], limit);
+    }
+    if args[0] == "--scene" {
+        let limit = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(40);
+        return scene_dump(&mut ar, &args[1], limit, args.get(3).map(String::as_str));
+    }
+    if args[0] == "--tile-instances" {
+        return tile_instances_check(&mut ar);
+    }
+    if args[0] == "--guess-ins" {
+        return guess_ins(&mut ar, &args[1], &args[2], &args[3]);
+    }
+    if args[0] == "--instances" {
+        return instances_check(&mut ar, &args[1]);
+    }
+    if args[0] == "--pack-survey" {
+        return pack_survey(&mut ar, &args[1]);
+    }
+    if args[0] == "--split" {
+        split_path(&ar, &args[1], &args[2]);
+        return Ok(());
+    }
+    if args[0] == "--grass-cells" {
+        return grass_cells(&mut ar, &args[1]);
+    }
+    if args[0] == "--terrain-materials" {
+        return terrain_materials(&mut ar);
+    }
+    if args[0] == "--hole-regions" {
+        return hole_regions(&mut ar);
+    }
+    if args[0] == "--holes" {
+        return holes_check(&mut ar);
     }
     if args[0] == "--texture" {
         // decoded RGBA8 of one array layer to a raw file (width, height as u32 first), for study outside the repo
@@ -356,7 +489,16 @@ fn main() -> anyhow::Result<()> {
         return player_check(&mut ar);
     }
     if args[0] == "--material" && args.len() >= 3 {
-        let m = model::load(&mut ar, &args[1], 0)?;
+        // a .trmdl (its materials) or a .trmtr file itself
+        let materials = if args[1].ends_with(".trmtr") {
+            model::parse_materials(&ar.read(&args[1])?)?
+        } else {
+            model::load(&mut ar, &args[1], 0)?.materials
+        };
+        struct M {
+            materials: std::collections::HashMap<String, model::Material>,
+        }
+        let m = M { materials };
         let mut names: Vec<&String> = m
             .materials
             .keys()
@@ -392,6 +534,23 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--trainer-anims" {
         return trainer_anims(&mut ar);
+    }
+    if args[0] == "--grep" {
+        return grep_archive(
+            &mut ar,
+            &args[1],
+            args.get(2).map(String::as_str).unwrap_or(""),
+        );
+    }
+    if args[0] == "--audio" {
+        return audio_survey(
+            &romfs,
+            args.get(1).map(String::as_str),
+            args.get(2).and_then(|n| n.parse().ok()),
+        );
+    }
+    if args[0] == "--textures" {
+        return texture_catalogue(&mut ar, args.get(1).map(String::as_str));
     }
     if args[0] == "--characters" {
         for p in ar.character_models() {
@@ -723,6 +882,7 @@ pub fn terrain_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
 /// For every tile: the splat names of its height file (slot 15) and the layer indices (R and G) its control map
 /// uses, with how many texels use each.
 pub fn splat_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    let mut all = std::collections::BTreeSet::new();
     for (x, y, path) in terrain::tiles(ar) {
         let header = archive::fnv1a64(&path);
         let mut names = Vec::new();
@@ -733,6 +893,7 @@ pub fn splat_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
             let Ok(b) = ar.read_hash(h) else { continue };
             if terrain::parse_heights(&b).is_ok() {
                 names = fb::Table::root(&b, 0)?.strings(15)?;
+                all.extend(names.iter().cloned());
             }
         }
         let mut used = std::collections::BTreeMap::<u8, usize>::new();
@@ -762,6 +923,10 @@ pub fn splat_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
             })
             .collect();
         println!("{x:02}_{y:02} names {names:?} used {used:?}");
+    }
+    // the global layer index is the position in the sorted set of every tile's names
+    for (k, n) in all.iter().enumerate() {
+        println!("layer {k:2} = {n}");
     }
     Ok(())
 }
@@ -820,6 +985,1115 @@ pub fn splat_seams(ar: &mut archive::Archive) -> anyhow::Result<()> {
             100.0 * same as f64 / total.max(1) as f64,
             100.0 * same_z as f64 / total_z.max(1) as f64
         );
+    }
+    Ok(())
+}
+
+/// Heights next to holes, over every tile: for each sample with a hole as a 4-neighbour, the profile walking
+/// straight away from the hole (k = 0 is the edge sample). Grouped by the height 8 samples in (coast: < 10 m,
+/// inland: above), so a "skirt" (edge samples falling towards 0) shows as a jump between k = 0..2 and the rest.
+pub fn holes_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    const K: usize = 9;
+    #[derive(Default)]
+    struct Group {
+        n: usize,
+        sum: [f64; K],
+        /// edge samples whose height is under a quarter of the height 4 samples in
+        drop0: usize,
+        drop1: usize,
+        /// edge samples under 1 m
+        low0: usize,
+        /// how many leading samples (k = 0, 1, ...) lie far below the profile further in
+        skirt_len: [usize; 4],
+    }
+    let (mut coast, mut inland) = (Group::default(), Group::default());
+    let mut per_tile = Vec::new();
+    for (x, y, path) in terrain::tiles(ar) {
+        let Ok(t) = terrain::load_heights(ar, &path) else {
+            println!("{x:02}_{y:02} FAILED");
+            continue;
+        };
+        let (w, d) = (t.width as isize, t.depth as isize);
+        let at = |c: isize, r: isize| -> Option<f32> {
+            (c >= 0 && r >= 0 && c < w && r < d).then(|| t.height(c as usize, r as usize))
+        };
+        let (mut edges, mut skirts) = (0usize, 0usize);
+        for r in 0..d {
+            for c in 0..w {
+                let h0 = t.height(c as usize, r as usize);
+                if h0 == 0.0 {
+                    continue;
+                }
+                for (dc, dr) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                    if at(c + dc, r + dr) != Some(0.0) {
+                        continue;
+                    }
+                    // walk away from the hole
+                    let prof: Option<Vec<f32>> = (0..K as isize)
+                        .map(|k| at(c - dc * k, r - dr * k).filter(|h| *h != 0.0))
+                        .collect();
+                    let Some(p) = prof else { continue };
+                    edges += 1;
+                    let g = if p[K - 1] < 10.0 {
+                        &mut coast
+                    } else {
+                        &mut inland
+                    };
+                    g.n += 1;
+                    for (sum, h) in g.sum.iter_mut().zip(&p) {
+                        *sum += *h as f64;
+                    }
+                    let ref4 = p[4].min(p[8]).max(1e-3);
+                    g.drop0 += (p[0] < 0.25 * ref4) as usize;
+                    g.drop1 += (p[1] < 0.25 * ref4) as usize;
+                    g.low0 += (p[0] < 1.0) as usize;
+                    let len = (0..4).take_while(|&k| p[k] < 0.5 * ref4).count();
+                    g.skirt_len[len.min(3)] += 1;
+                    skirts += (p[0] < 0.25 * ref4 && p[8] >= 10.0) as usize;
+                }
+            }
+        }
+        per_tile.push(format!(
+            "{x:02}_{y:02} edge samples {edges}, inland skirts {skirts}"
+        ));
+    }
+    for l in &per_tile {
+        println!("{l}");
+    }
+    for (name, g) in [("coast", &coast), ("inland", &inland)] {
+        let mean: Vec<String> = g
+            .sum
+            .iter()
+            .map(|s| format!("{:.1}", s / g.n.max(1) as f64))
+            .collect();
+        println!(
+            "{name}: {} edge profiles; mean height k=0..8 {mean:?}; edge < 1/4 of inner {} ({:.1}%), \
+             next < 1/4 {}; edge < 1 m {}; leading samples below half: 0:{} 1:{} 2:{} 3+:{}",
+            g.n,
+            g.drop0,
+            100.0 * g.drop0 as f64 / g.n.max(1) as f64,
+            g.drop1,
+            g.low0,
+            g.skirt_len[0],
+            g.skirt_len[1],
+            g.skirt_len[2],
+            g.skirt_len[3],
+        );
+    }
+    Ok(())
+}
+
+/// One tile ("08_03"): the `_heightmap.bntx` (R16?) against the height file, and cross-sections across the
+/// first few inland hole edges (samples of both, walking from the ground into the hole).
+pub fn heightmap_check(ar: &mut archive::Archive, tile: &str) -> anyhow::Result<()> {
+    let path = format!("field_graphic/terrain/terrain_{tile}/ter_{tile}.trtrr");
+    let t = terrain::load_heights(ar, &path)?;
+    let hm_path = format!("field_graphic/terrain/terrain_{tile}/ter_{tile}_heightmap.bntx");
+    let b = ar.read(&hm_path)?;
+    let (format, w, h, raw) = texture::raw_texels(&b, 2)?;
+    println!(
+        "heightmap {w}x{h} format {format:#06x}; height file {}x{}",
+        t.width, t.depth
+    );
+    let hm: Vec<f32> = raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c) as f32 / 65535.0)
+        .collect();
+    // fit heights = a * hm + b over non-hole samples
+    let (mut n, mut sx, mut sy, mut sxx, mut sxy) = (0f64, 0f64, 0f64, 0f64, 0f64);
+    let (mut zero_hm_in_hole, mut holes) = (0, 0);
+    for r in 0..t.depth.min(h as usize) {
+        for c in 0..t.width.min(w as usize) {
+            let y = t.height(c, r) as f64;
+            let x = hm[r * w as usize + c] as f64;
+            if y == 0.0 {
+                holes += 1;
+                zero_hm_in_hole += (x == 0.0) as usize;
+                continue;
+            }
+            n += 1.0;
+            sx += x;
+            sy += y;
+            sxx += x * x;
+            sxy += x * y;
+        }
+    }
+    let a = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+    let b0 = (sy - a * sx) / n;
+    let mut err = 0f64;
+    for r in 0..t.depth.min(h as usize) {
+        for c in 0..t.width.min(w as usize) {
+            let y = t.height(c, r) as f64;
+            if y != 0.0 {
+                err = err.max((a * hm[r * w as usize + c] as f64 + b0 - y).abs());
+            }
+        }
+    }
+    println!(
+        "height = {a:.3} * hm + {b0:.3} (max error {err:.3} m over {n} samples); {holes} holes, {zero_hm_in_hole} of them 0 in the heightmap"
+    );
+    let mut shown = 0;
+    'rows: for r in (0..t.depth).step_by(16) {
+        for c in 8..t.width - 8 {
+            if t.height(c, r) != 0.0 && t.height(c + 1, r) == 0.0 && t.height(c - 8, r) > 30.0 {
+                let line: Vec<String> = (c - 8..(c + 6).min(t.width))
+                    .map(|k| {
+                        format!(
+                            "{:.1}/{:.1}",
+                            t.height(k, r),
+                            a * hm[r * w as usize + k] as f64 + b0
+                        )
+                    })
+                    .collect();
+                println!("row {r} cols {}..: {}", c - 8, line.join(" "));
+                shown += 1;
+                if shown == 6 {
+                    break 'rows;
+                }
+                continue 'rows;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// All tiles stitched into one grid (rows from z -5500); holes flood-filled from the grid's border are the sea,
+/// the rest are inland hole regions. For each region larger than 100 samples: size, place, and the heights of
+/// its edge samples (k = 0) and 2, 4, 8 samples further out.
+pub fn hole_regions(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    const N: usize = 512 * terrain::TILES as usize + 1;
+    let mut g = vec![f32::NAN; N * N]; // NAN = no tile
+    for (x, y, path) in terrain::tiles(ar) {
+        let Ok(t) = terrain::load_heights(ar, &path) else {
+            continue;
+        };
+        let r0 = ((t.origin[2] + 5500.0) / 500.0).round() as usize * 512;
+        let c0 = x as usize * 512;
+        for r in 0..t.depth {
+            for c in 0..t.width {
+                if let Some(v) = g.get_mut((r0 + r) * N + c0 + c) {
+                    *v = t.height(c, r);
+                }
+            }
+        }
+        let _ = y;
+    }
+    let hole = |v: f32| v == 0.0 || v.is_nan();
+    // label: 0 ground, 1 sea, 2.. inland regions
+    let mut label = vec![0u32; N * N];
+    let fill = |label: &mut Vec<u32>, start: usize, id: u32| -> Vec<usize> {
+        let mut stack = vec![start];
+        let mut cells = Vec::new();
+        label[start] = id;
+        while let Some(i) = stack.pop() {
+            cells.push(i);
+            let (r, c) = (i / N, i % N);
+            let mut push = |j: usize| {
+                if label[j] == 0 && hole(g[j]) {
+                    label[j] = id;
+                    stack.push(j);
+                }
+            };
+            if r > 0 {
+                push(i - N);
+            }
+            if r + 1 < N {
+                push(i + N);
+            }
+            if c > 0 {
+                push(i - 1);
+            }
+            if c + 1 < N {
+                push(i + 1);
+            }
+        }
+        cells
+    };
+    for k in 0..N {
+        for i in [k, (N - 1) * N + k, k * N, k * N + N - 1] {
+            if label[i] == 0 && hole(g[i]) {
+                fill(&mut label, i, 1);
+            }
+        }
+    }
+    let mut regions = Vec::new();
+    let mut next = 2;
+    for i in 0..N * N {
+        if label[i] == 0 && hole(g[i]) {
+            let cells = fill(&mut label, i, next);
+            regions.push((next, cells));
+            next += 1;
+        }
+    }
+    // edge profiles per label
+    let mut stats: std::collections::HashMap<u32, (usize, [f64; 4], usize)> = Default::default();
+    for r in 0..N {
+        for c in 0..N {
+            let i = r * N + c;
+            if hole(g[i]) {
+                continue;
+            }
+            for (dc, dr) in [(1isize, 0isize), (-1, 0), (0, 1), (0, -1)] {
+                let (nr, nc) = (r as isize + dr, c as isize + dc);
+                if nr < 0 || nc < 0 || nr >= N as isize || nc >= N as isize {
+                    continue;
+                }
+                let j = nr as usize * N + nc as usize;
+                if !hole(g[j]) {
+                    continue;
+                }
+                let at = |k: isize| {
+                    let (rr, cc) = (r as isize - dr * k, c as isize - dc * k);
+                    (rr >= 0 && cc >= 0 && rr < N as isize && cc < N as isize)
+                        .then(|| g[rr as usize * N + cc as usize])
+                        .filter(|v| !hole(*v))
+                };
+                let (Some(a), Some(b), Some(d), Some(e)) = (at(0), at(2), at(4), at(8)) else {
+                    continue;
+                };
+                let s = stats.entry(label[j]).or_default();
+                s.0 += 1;
+                for (k, v) in [a, b, d, e].iter().enumerate() {
+                    s.1[k] += *v as f64;
+                }
+                s.2 += (a < 1.0) as usize;
+            }
+        }
+    }
+    let print = |name: String, cells: usize, s: Option<&(usize, [f64; 4], usize)>| {
+        let Some((n, sum, low)) = s else {
+            println!("{name}: {cells} samples, no full edge profiles");
+            return;
+        };
+        let m: Vec<String> = sum
+            .iter()
+            .map(|v| format!("{:.1}", v / *n as f64))
+            .collect();
+        println!(
+            "{name}: {cells} samples; {n} edge profiles, mean k=0/2/4/8 {m:?}, edge < 1 m {low} ({:.0}%)",
+            100.0 * *low as f64 / *n as f64
+        );
+    };
+    let sea = label.iter().filter(|l| **l == 1).count();
+    print("sea".into(), sea, stats.get(&1));
+    regions.sort_by_key(|(_, c)| std::cmp::Reverse(c.len()));
+    for (id, cells) in regions.iter().filter(|(_, c)| c.len() > 100) {
+        let (sr, sc) = cells
+            .iter()
+            .fold((0usize, 0usize), |(a, b), i| (a + i / N, b + i % N));
+        let (r, c) = (sr / cells.len(), sc / cells.len());
+        let z = r as f32 * 500.0 / 512.0 - 5500.0;
+        let tx = c / 512;
+        let ty = if z < -5000.0 {
+            0
+        } else {
+            ((-z - 500.0) / 500.0).floor() as i32 + 1
+        };
+        print(
+            format!(
+                "region {id} around x {:.0} z {z:.0} (tile ~{tx:02}_{ty:02})",
+                c as f32 * 500.0 / 512.0
+            ),
+            cells.len(),
+            stats.get(id),
+        );
+    }
+    println!(
+        "{} inland regions in all, {} larger than 100 samples",
+        regions.len(),
+        regions.iter().filter(|(_, c)| c.len() > 100).count()
+    );
+    Ok(())
+}
+
+/// The terrain materials of every tile: how often each switch value and texture role occurs, and both rows of the
+/// shared `global_splatST_params` (one line per layer).
+pub fn terrain_materials(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let mut switches: BTreeMap<String, usize> = BTreeMap::new();
+    let mut floats: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut tiles, mut failed) = (0, 0);
+    let mut param_path = None;
+    for (x, y, path) in terrain::tiles(ar) {
+        let dir = path.rsplit_once('/').map_or("", |(d, _)| d).to_string();
+        let mtr = format!("{dir}/ter_{x:02}_{y:02}.trmtr");
+        let mats = match ar.read(&mtr).and_then(|b| model::parse_materials(&b)) {
+            Ok(m) => m,
+            Err(e) => {
+                failed += 1;
+                println!("{x:02}_{y:02} {e:#}");
+                continue;
+            }
+        };
+        tiles += 1;
+        for (name, m) in &mats {
+            for (k, v) in &m.switches {
+                *switches.entry(format!("{name}: {k}={v}")).or_default() += 1;
+            }
+            for (k, v) in &m.floats {
+                if !(k.starts_with("RoughnessLayer") || k.contains("Threshold")) || *v != 1.0 {
+                    *floats.entry(format!("{name}: {k}={v}")).or_default() += 1;
+                }
+            }
+            if let Some(f) = m.texture("SplatParam") {
+                param_path.get_or_insert(model::resolve(&dir, f));
+            }
+        }
+    }
+    println!("{tiles} tile materials read, {failed} failed");
+    for (k, n) in &switches {
+        println!("  {n:4} {k}");
+    }
+    println!("floats (roughness and thresholds only when not 1):");
+    for (k, n) in &floats {
+        println!("  {n:4} {k}");
+    }
+    if let Some(p) = param_path {
+        let (w, h, px) = texture::decode_rgba32f(&ar.read(&p)?)?;
+        println!("{p}: {w} x {h}");
+        for k in 0..64.min(w as usize) {
+            let row1 = px.get(w as usize + k).copied().unwrap_or_default();
+            println!("  layer {k:2}: row0 {:?} row1 {row1:?}", px[k]);
+        }
+    }
+    Ok(())
+}
+
+/// One tile ("06_03"): the height file's grass names (slot 12) and per-cell values (slot 13), how often each
+/// value occurs, and for each value the share of cells whose dominant splat layer is each layer.
+pub fn grass_cells(ar: &mut archive::Archive, tile: &str) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let path = format!("field_graphic/terrain/terrain_{tile}/ter_{tile}.trtrr");
+    let header = archive::fnv1a64(&path);
+    let mut found = None;
+    for h in ar.pack_files(&path)? {
+        if h == header {
+            continue;
+        }
+        let Ok(b) = ar.read_hash(h) else { continue };
+        if terrain::parse_heights(&b).is_ok() {
+            found = Some(b);
+        }
+    }
+    let b = found.ok_or_else(|| anyhow::anyhow!("no height file"))?;
+    let root = fb::Table::root(&b, 0)?;
+    println!("slot 12 {:?}", root.strings(12)?);
+    println!("slot 15 {:?}", root.strings(15)?);
+    println!("slots 10/11 {} x {}", root.u32(10, 0), root.u32(11, 0));
+    let (start, n) = root.vector(13)?;
+    let raw = fb::get(&b, start, n * 4)?;
+    let vals: Vec<u32> = raw
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| u32::from_le_bytes(*c))
+        .collect();
+    let m = terrain::tile_material(ar, &path)?;
+    let ctl = texture::decode_bntx(&ar.read(&m.splat_alpha)?)?;
+    let mut by: BTreeMap<u32, BTreeMap<u8, usize>> = BTreeMap::new();
+    for (i, v) in vals.iter().enumerate() {
+        let p = ctl.rgba.get(i).copied().unwrap_or_default();
+        let dom = if p[2] >= p[3] { p[0] } else { p[1] };
+        *by.entry(*v).or_default().entry(dom).or_default() += 1;
+    }
+    println!("{n} values; value: cells, then dominant layer: cells");
+    for (v, layers) in &by {
+        let total: usize = layers.values().sum();
+        let mut l: Vec<_> = layers.iter().collect();
+        l.sort_by_key(|(_, c)| std::cmp::Reverse(**c));
+        println!(
+            "  {v:#010x}: {total} cells, layers {:?}",
+            &l[..l.len().min(6)]
+        );
+    }
+    Ok(())
+}
+
+/// Rebuilds a path from a pack name: `prefix` (with its slashes) + `rest` (collapsed), trying every way to put up
+/// to three slashes into `rest`. Prints each split the archive contains.
+pub fn split_path(ar: &archive::Archive, prefix: &str, rest: &str) {
+    let n = rest.len();
+    let cuts: Vec<usize> = (1..n).filter(|&i| rest.is_char_boundary(i)).collect();
+    let mut found = 0;
+    let mut test = |slashes: &[usize]| {
+        let mut p = prefix.trim_end_matches('/').to_string();
+        p.push('/');
+        let mut last = 0;
+        for &c in slashes {
+            p.push_str(&rest[last..c]);
+            p.push('/');
+            last = c;
+        }
+        p.push_str(&rest[last..]);
+        if ar.contains(&p) {
+            println!("YES {p}");
+            found += 1;
+        }
+    };
+    test(&[]);
+    for (i, &a) in cuts.iter().enumerate() {
+        test(&[a]);
+        for (j, &b) in cuts.iter().enumerate().skip(i + 1) {
+            test(&[a, b]);
+            for &c in cuts.iter().skip(j + 1) {
+                test(&[a, b, c]);
+            }
+        }
+    }
+    println!("{found} found");
+}
+
+/// What a pack holds: files grouped by kind (magic, or a FlatBuffer's first string field), with counts and sizes,
+/// and one example hash per kind.
+pub fn pack_survey(ar: &mut archive::Archive, path: &str) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let mut kinds: BTreeMap<String, (usize, usize, u64)> = BTreeMap::new();
+    for h in ar.pack_files(path)? {
+        let Ok(b) = ar.read_hash(h) else {
+            *kinds.entry("unreadable".into()).or_default() = (0, 0, h);
+            continue;
+        };
+        let kind = if b.len() >= 4 && b[..4].iter().all(|c| c.is_ascii_uppercase()) {
+            String::from_utf8_lossy(&b[..4]).into_owned()
+        } else if b.get(4..8) == Some(b"TAG0") {
+            "Havok".into()
+        } else if let Ok(t) = Table::root(&b, 0) {
+            let s = (0..t.slot_count().min(4))
+                .find_map(|i| t.string(i).ok().flatten().map(|s| (i, s.to_string())))
+                .filter(|(_, s)| !s.is_empty() && s.len() < 60);
+            match s {
+                Some((i, s)) if s.chars().all(|c| c.is_ascii_graphic()) => {
+                    let short: String = s.chars().take_while(|c| !c.is_ascii_digit()).collect();
+                    format!("fb slot{i} str {short:?}… ({} slots)", t.slot_count())
+                }
+                _ => format!("fb {} slots", t.slot_count()),
+            }
+        } else {
+            "other".into()
+        };
+        let e = kinds.entry(kind).or_insert((0, 0, h));
+        e.0 += 1;
+        e.1 += b.len();
+    }
+    for (k, (n, bytes, ex)) in &kinds {
+        println!("{n:6} {:>11} bytes  {k}  e.g. #{ex:016x}", bytes);
+    }
+    Ok(())
+}
+
+/// Every tile's heights, for ground lookups in world x/z (bilinear; None over a hole or off the map).
+struct Ground(Vec<terrain::HeightTile>);
+
+impl Ground {
+    fn load(ar: &mut archive::Archive) -> Ground {
+        Ground(
+            terrain::tiles(ar)
+                .iter()
+                .filter_map(|(_, _, p)| terrain::load_heights(ar, p).ok())
+                .collect(),
+        )
+    }
+
+    /// The viewer's lookup (`HeightTile::height_at`), over every tile.
+    fn at(&self, x: f32, z: f32) -> Option<f32> {
+        self.0.iter().find_map(|t| t.height_at(x, z))
+    }
+}
+
+/// Statistics over a set of instance files: how many parse, instance counts, bounds, scales, and how far each
+/// instance's y lies from the ground under it.
+#[derive(Default)]
+struct InstanceStats {
+    files: usize,
+    failed: usize,
+    instances: usize,
+    min: [f32; 3],
+    max: [f32; 3],
+    scale: (f32, f32),
+    /// |y - ground| < 0.5 m, < 2 m, >= 2 m, no ground (hole / off the map)
+    ground: [usize; 4],
+    /// the last row of every matrix is 0, 0, 0, 1
+    affine: usize,
+}
+
+impl InstanceStats {
+    fn add(&mut self, buf: &[u8], ground: &Ground) -> Option<instances::Instances> {
+        if self.files == 0 && self.failed == 0 {
+            self.min = [f32::MAX; 3];
+            self.max = [f32::MIN; 3];
+            self.scale = (f32::MAX, f32::MIN);
+        }
+        match instances::parse(buf) {
+            Ok(ins) => {
+                self.files += 1;
+                for m in &ins.matrices {
+                    self.instances += 1;
+                    let p = instances::Instances::position(m);
+                    self.min = std::array::from_fn(|k| self.min[k].min(p[k]));
+                    self.max = std::array::from_fn(|k| self.max[k].max(p[k]));
+                    let s = instances::Instances::scale(m);
+                    self.scale.0 = self.scale.0.min(s[1]);
+                    self.scale.1 = self.scale.1.max(s[1]);
+                    self.affine +=
+                        (m[3] == 0.0 && m[7] == 0.0 && m[11] == 0.0 && m[15] == 1.0) as usize;
+                    let k = match ground.at(p[0], p[2]) {
+                        Some(h) if (p[1] - h).abs() < 0.5 => 0,
+                        Some(h) if (p[1] - h).abs() < 2.0 => 1,
+                        Some(_) => 2,
+                        None => 3,
+                    };
+                    self.ground[k] += 1;
+                }
+                Some(ins)
+            }
+            Err(_) => {
+                self.failed += 1;
+                None
+            }
+        }
+    }
+
+    fn print(&self, name: &str) {
+        println!(
+            "{name}: {} files parse, {} fail; {} instances ({} with last row 0,0,0,1); positions {:?} .. {:?}; \
+             y scale {:.2}..{:.2}; y vs. ground: <0.5 m {}, <2 m {}, further {}, no ground {}",
+            self.files,
+            self.failed,
+            self.instances,
+            self.affine,
+            self.min,
+            self.max,
+            self.scale.0,
+            self.scale.1,
+            self.ground[0],
+            self.ground[1],
+            self.ground[2],
+            self.ground[3]
+        );
+    }
+}
+
+/// Every file of the pack holding `path`, read as instance buffers, against the terrain.
+pub fn instances_check(ar: &mut archive::Archive, path: &str) -> anyhow::Result<()> {
+    let ground = Ground::load(ar);
+    let mut stats = InstanceStats::default();
+    let mut by_tile = std::collections::BTreeMap::<(i32, i32), usize>::new();
+    for h in ar.pack_files(path)? {
+        let Ok(b) = ar.read_hash(h) else { continue };
+        if let Some(ins) = stats.add(&b, &ground) {
+            for m in &ins.matrices {
+                let p = instances::Instances::position(m);
+                *by_tile
+                    .entry(((p[0] / 500.0).floor() as i32, (p[2] / 500.0).floor() as i32))
+                    .or_default() += 1;
+            }
+        }
+    }
+    stats.print(path);
+    println!("instances per 500 m cell (x / 500, z / 500): {by_tile:?}");
+    // does a shift of the instances by whole tiles fit the ground better?
+    let mut all = Vec::new();
+    for h in ar.pack_files(path)? {
+        if let Some(ins) = ar.read_hash(h).ok().and_then(|b| instances::parse(&b).ok()) {
+            all.extend(ins.matrices.iter().map(instances::Instances::position));
+        }
+    }
+    // the _00 row's files say z -5500; would it fit at -500 (next to row 01) instead?
+    let moved = Ground(
+        ground
+            .0
+            .iter()
+            .map(|t| terrain::HeightTile {
+                origin: if t.origin[2] < -5250.0 {
+                    [t.origin[0], t.origin[1], t.origin[2] + 5000.0]
+                } else {
+                    t.origin
+                },
+                scale: t.scale,
+                width: t.width,
+                depth: t.depth,
+                heights: t.heights.clone(),
+            })
+            .collect(),
+    );
+    for (name, g) in [
+        ("_00 row at z -5500", &ground),
+        ("_00 row at z -500", &moved),
+    ] {
+        let (mut near, mut lo, mut hi) = (0, 0, 0);
+        for p in all.iter().filter(|p| p[2] > -500.0 || p[2] < -5000.0) {
+            match g.at(p[0], p[2]) {
+                Some(h) if (p[1] - h).abs() < 0.5 => near += 1,
+                Some(_) => lo += 1,
+                None => hi += 1,
+            }
+        }
+        println!(
+            "{name}: instances in the outer rows: {near} within 0.5 m, {lo} further, {hi} no ground"
+        );
+    }
+    for dz in [-1000.0, -500.0, 0.0, 500.0] {
+        for dx in [-500.0, 0.0, 500.0] {
+            let close = all
+                .iter()
+                .filter(|p| {
+                    ground
+                        .at(p[0] + dx, p[2] + dz)
+                        .is_some_and(|h| (p[1] - h).abs() < 0.5)
+                })
+                .count();
+            println!(
+                "shift x {dx:+} z {dz:+}: {close} of {} within 0.5 m of the ground",
+                all.len()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Recovers names in the pack holding `path`: `<dir>/ins_root_<stem>_<NNN>_X<xx>_Z<zz>.trins` for every folder in
+/// `dirs` (comma-separated), every model stem in the file `stems` (one per line), NNN 000..099 and cells 00..07.
+/// Prints how many of the pack's files got a name and the names found per stem.
+pub fn guess_ins(
+    ar: &mut archive::Archive,
+    path: &str,
+    stems: &str,
+    dirs: &str,
+) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, HashSet};
+    let files: HashSet<u64> = ar.pack_files(path)?.into_iter().collect();
+    let stems: Vec<String> = std::fs::read_to_string(stems)?
+        .lines()
+        .map(str::trim)
+        .filter(|s| s.len() > 3)
+        .map(String::from)
+        .collect();
+    let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut named = 0;
+    for dir in dirs.split(',') {
+        for stem in &stems {
+            for n in 0..100 {
+                for x in 0..8 {
+                    for z in 0..8 {
+                        let p = format!("{dir}/ins_root_{stem}_{n:03}_X{x:02}_Z{z:02}.trins");
+                        if files.contains(&archive::fnv1a64(&p)) {
+                            named += 1;
+                            found
+                                .entry(stem.clone())
+                                .or_default()
+                                .push(format!("{n:03} X{x:02} Z{z:02} in {dir}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    println!("{named} of {} files named", files.len());
+    for (stem, hits) in &found {
+        println!("{stem}: {} {:?}", hits.len(), &hits[..hits.len().min(4)]);
+    }
+    Ok(())
+}
+
+/// Every tile's tree instances (trtrr slot 4): lists, instance files, models (exist? load?), ground fit.
+pub fn tile_instances_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    let ground = Ground::load(ar);
+    let mut stats = InstanceStats::default();
+    let (mut lists, mut list_failed, mut missing_files) = (0, 0, 0);
+    let mut models = std::collections::BTreeMap::<String, usize>::new();
+    for (x, y, path) in terrain::tiles(ar) {
+        match terrain::tile_instances(ar, &path) {
+            Ok(list) => {
+                lists += 1;
+                for (model, files) in list {
+                    for f in files {
+                        match ar.read(&f) {
+                            Ok(b) => {
+                                if let Some(ins) = stats.add(&b, &ground) {
+                                    *models.entry(model.clone()).or_default() += ins.matrices.len();
+                                }
+                            }
+                            Err(_) => {
+                                missing_files += 1;
+                                println!("{x:02}_{y:02} missing {f}");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                list_failed += 1;
+                println!("{x:02}_{y:02} list: {e:#}");
+            }
+        }
+    }
+    println!(
+        "{lists} tile lists read, {list_failed} failed, {missing_files} instance files missing"
+    );
+    stats.print("tile instances");
+    let (mut load_ok, mut load_failed) = (0, 0);
+    for (m, n) in &models {
+        match model::load(ar, m, 0) {
+            Ok(md) => {
+                load_ok += 1;
+                println!(
+                    "  {n:6} x {m}: {} triangles, {} LODs?, height {:.1} m, min y {:.2}",
+                    md.triangle_count(),
+                    md.mesh_files,
+                    md.max[1] - md.min[1],
+                    md.min[1]
+                );
+            }
+            Err(e) => {
+                load_failed += 1;
+                println!("  {n:6} x {m}: FAIL {e:#}");
+            }
+        }
+    }
+    println!(
+        "{} models: {load_ok} load, {load_failed} fail",
+        models.len()
+    );
+    Ok(())
+}
+
+/// Every town scene: what it places, whether the models load, how its instance files sit on the ground, and how
+/// much of the unity_output pack the scenes name.
+pub fn town_scenes_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, HashSet};
+    let ground = Ground::load(ar);
+    let scenes = maps::field_scenes(ar);
+    println!(
+        "{} scenes: {:?}",
+        scenes.len(),
+        scenes.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>()
+    );
+    let pack: HashSet<u64> = ar
+        .pack_files(&format!(
+            "{}/town_t07_field_streaming_s_/ins_root_plants_un_garden_tulip01_yellow_007_X00_Z00.trins",
+            scene::UNITY_OUTPUT
+        ))?
+        .into_iter()
+        .collect();
+    let mut named = HashSet::new();
+    let mut models: BTreeMap<String, usize> = BTreeMap::new();
+    let mut stats = InstanceStats::default();
+    let (mut placed, mut placed_ground, mut errors) = (0, [0usize; 4], 0);
+    for (code, path) in &scenes {
+        let s = match ar.read(path).and_then(|b| scene::parse(&b)) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("{code}: FAIL {e:#}");
+                continue;
+            }
+        };
+        let one = format!("{}1.trscn", path.trim_end_matches("0.trscn"));
+        let same = ar
+            .read(&one)
+            .ok()
+            .map(|b| b == ar.read(path).unwrap_or_default());
+        let c = scene::content(&s);
+        errors += c.errors.len();
+        for p in &c.placements {
+            *models.entry(p.model.clone()).or_default() += 1;
+            placed += 1;
+            let t = p.matrix.w;
+            let k = match ground.at(t.x, t.z) {
+                Some(h) if (t.y - h).abs() < 0.5 => 0,
+                Some(h) if t.y > h => 1,
+                Some(_) => 2,
+                None => 3,
+            };
+            placed_ground[k] += 1;
+        }
+        for scene::Instancer { model, file: f, .. } in &c.instancers {
+            *models.entry(model.clone()).or_default() += 1;
+            named.insert(archive::fnv1a64(f));
+            match ar.read(f) {
+                Ok(b) => {
+                    stats.add(&b, &ground);
+                }
+                Err(_) => println!("{code}: missing {f}"),
+            }
+        }
+        if c.placements.is_empty() && c.instancers.is_empty() && same == Some(true) {
+            continue;
+        }
+        let (mut sum, mut n) = ([0f64; 3], 0);
+        for p in &c.placements {
+            sum = [
+                sum[0] + p.matrix.w.x as f64,
+                sum[1] + p.matrix.w.y as f64,
+                sum[2] + p.matrix.w.z as f64,
+            ];
+            n += 1;
+        }
+        let n = n.max(1) as f64;
+        print!(
+            "[centre {:.0} {:.0} {:.0}] ",
+            sum[0] / n,
+            sum[1] / n,
+            sum[2] / n
+        );
+        println!(
+            "{code}: {} placements, {} instance files, {} errors, _1 identical: {same:?}",
+            c.placements.len(),
+            c.instancers.len(),
+            c.errors.len()
+        );
+    }
+    println!(
+        "{placed} placements: on the ground (0.5 m) {}, above {}, below {}, no ground {}; {errors} node errors",
+        placed_ground[0], placed_ground[1], placed_ground[2], placed_ground[3]
+    );
+    stats.print("instance files the scenes name");
+    println!(
+        "the scenes name {} of the {} files in the unity_output pack",
+        named.intersection(&pack).count(),
+        pack.len()
+    );
+    let (mut ok, mut failed) = (0, 0);
+    // shader name: (materials, parts, models)
+    let mut shaders: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+    for m in models.keys() {
+        match model::load(ar, m, 0) {
+            Ok(md) => {
+                ok += 1;
+                let mut seen = std::collections::BTreeSet::new();
+                for mat in md.materials.values() {
+                    shaders.entry(mat.shader.clone()).or_default().0 += 1;
+                }
+                for sm in &md.submeshes {
+                    let sh = md
+                        .materials
+                        .get(&sm.material)
+                        .map(|m| m.shader.clone())
+                        .unwrap_or_default();
+                    shaders.entry(sh.clone()).or_default().1 += 1;
+                    if seen.insert(sh.clone()) {
+                        shaders.entry(sh).or_default().2 += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("model FAIL {m}: {e:#}");
+            }
+        }
+    }
+    println!("{} distinct models: {ok} load, {failed} fail", models.len());
+    println!("shaders (materials, parts, models):");
+    for (sh, n) in &shaders {
+        println!("  {sh:30} {n:?}");
+    }
+    let mut by_use: Vec<_> = models.iter().collect();
+    by_use.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for (m, n) in by_use
+        .iter()
+        .filter(|(m, _)| !m.contains("/plants_"))
+        .take(40)
+    {
+        println!("  {n:4} {m}");
+    }
+    Ok(())
+}
+
+/// Every scene in every pack that holds one of the known field scenes: name, placed models, instance files,
+/// and the ones whose models contain `needle`.
+pub fn scene_packs(ar: &mut archive::Archive, needle: &str) -> anyhow::Result<()> {
+    use std::collections::BTreeSet;
+    let mut packs: BTreeSet<Vec<u64>> = BTreeSet::new();
+    for (_, p) in maps::field_scenes(ar) {
+        let mut files = ar.pack_files(&p)?;
+        files.sort();
+        packs.insert(files);
+    }
+    println!("{} packs hold the known field scenes", packs.len());
+    for files in &packs {
+        println!("== pack of {} files", files.len());
+        for h in files {
+            let Ok(b) = ar.read_hash(*h) else { continue };
+            let Ok(s) = scene::parse(&b) else { continue };
+            if s.nodes.is_empty() {
+                continue;
+            }
+            let c = scene::content(&s);
+            let hits: BTreeSet<&str> = c
+                .placements
+                .iter()
+                .map(|p| p.model.as_str())
+                .chain(c.instancers.iter().map(|i| i.model.as_str()))
+                .filter(|m| !needle.is_empty() && m.contains(needle))
+                .collect();
+            println!(
+                "  #{h:016x} {:?}: {} placements, {} instance files{}",
+                s.name,
+                c.placements.len(),
+                c.instancers.len(),
+                if hits.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {needle}: {hits:?}")
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
+/// LOD data: every ModelComponent of every field scene, the values of its float slots 5..18 (how often each),
+/// and every placed model's mesh-file count and `.trmdl` slot 4 (LOD table?) with slot 4's type string.
+pub fn lod_survey(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let mut slots: BTreeMap<(usize, String), usize> = BTreeMap::new();
+    let mut models = std::collections::BTreeSet::new();
+    let mut components = 0;
+    for (_, path) in maps::field_scenes(ar) {
+        let Ok(s) = ar.read(&path).and_then(|b| scene::parse(&b)) else {
+            continue;
+        };
+        for n in &s.nodes {
+            n.walk(&mut Vec::new(), &mut |n, _| {
+                if n.kind != "trinity_ModelComponent" {
+                    return;
+                }
+                let Some(t) = n.table() else { return };
+                components += 1;
+                if let Ok(Some(p)) = t.string(0) {
+                    models.insert(p);
+                }
+                for k in 5..19 {
+                    if t.field(k).is_some() {
+                        let raw = t.u32(k, 0);
+                        let f = f32::from_bits(raw);
+                        let v = if f.abs() > 1e-3 && f.abs() < 1e6 {
+                            format!("{f}")
+                        } else {
+                            format!("u{raw}")
+                        };
+                        *slots.entry((k, v)).or_default() += 1;
+                    }
+                }
+            });
+        }
+    }
+    println!("{components} ModelComponents, {} models", models.len());
+    for ((k, v), n) in &slots {
+        println!("  slot {k:2} = {v:>10}: {n}");
+    }
+    let mut files: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut lod_types: BTreeMap<String, usize> = BTreeMap::new();
+    let mut shown = 0;
+    for m in &models {
+        let Ok(b) = ar.read(m) else { continue };
+        let Ok(t) = Table::root(&b, 0) else { continue };
+        *files
+            .entry(t.tables(1).map(|v| v.len()).unwrap_or(0))
+            .or_default() += 1;
+        if let Ok(v) = t.tables(4) {
+            for e in v {
+                let ty = e.string(1).ok().flatten().unwrap_or_default();
+                *lod_types.entry(ty).or_default() += 1;
+                if shown < 3 {
+                    shown += 1;
+                    println!("{m} slot 4:");
+                    dump(&e, 2, 3);
+                }
+            }
+        }
+    }
+    println!("mesh files per model: {files:?}");
+    println!("trmdl slot 4 types: {lod_types:?}");
+    Ok(())
+}
+
+/// A scene as a tree: objects with their transforms, models and instance files (other kinds by name only).
+pub fn scene_tree(ar: &mut archive::Archive, path: &str, limit: usize) -> anyhow::Result<()> {
+    let buf = match path.strip_prefix('#') {
+        Some(h) => ar.read_hash(u64::from_str_radix(h, 16)?)?,
+        None => ar.read(path)?,
+    };
+    let s = scene::parse(&buf)?;
+    let mut shown = 0;
+    for n in &s.nodes {
+        n.walk(&mut Vec::new(), &mut |n, parents| {
+            if shown >= limit {
+                return;
+            }
+            shown += 1;
+            let pad = "  ".repeat(parents.len());
+            let kind = n.kind.trim_start_matches("trinity_");
+            match (n.object(), n.reference()) {
+                (Ok(Some((name, t))), _) => println!(
+                    "{pad}{kind} {name:?} T {:?} R {:?} S {:?}",
+                    t.translation, t.rotation, t.scale
+                ),
+                (Err(e), _) => println!("{pad}{kind} FAIL {e:#}"),
+                (_, Some((what, p))) => println!("{pad}{kind} {what} {p}"),
+                _ => println!("{pad}{kind}"),
+            }
+        });
+    }
+    Ok(())
+}
+
+/// A scene: how many nodes of each kind, then the first `limit` nodes as a tree with their data's slots
+/// (only kinds matching `filter`, if given).
+pub fn scene_dump(
+    ar: &mut archive::Archive,
+    path: &str,
+    limit: usize,
+    filter: Option<&str>,
+) -> anyhow::Result<()> {
+    let buf = match path.strip_prefix('#') {
+        Some(h) => ar.read_hash(u64::from_str_radix(h, 16)?)?,
+        None => ar.read(path)?,
+    };
+    let s = scene::parse(&buf)?;
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    for n in &s.nodes {
+        n.walk(&mut Vec::new(), &mut |n, _| {
+            *kinds.entry(n.kind.clone()).or_default() += 1
+        });
+    }
+    println!(
+        "scene {:?}: {} top nodes; kinds {kinds:?}",
+        s.name,
+        s.nodes.len()
+    );
+    let mut shown = 0;
+    for n in &s.nodes {
+        n.walk(&mut Vec::new(), &mut |n, parents| {
+            if shown >= limit || filter.is_some_and(|f| !n.kind.contains(f)) {
+                return;
+            }
+            shown += 1;
+            let pad = "  ".repeat(parents.len());
+            println!("{pad}== {} ({} bytes)", n.kind, n.data.len());
+            if let Some(t) = n.table() {
+                dump(&t, 2, 3);
+            }
+            if filter.is_some() {
+                for (k, row) in n.data.chunks(32).enumerate() {
+                    let words: Vec<String> = row
+                        .chunks(4)
+                        .map(|w| {
+                            let mut b = [0u8; 4];
+                            b[..w.len()].copy_from_slice(w);
+                            let f = f32::from_le_bytes(b);
+                            if f.abs() > 1e-4 && f.abs() < 1e6 {
+                                format!("{f:>10.4}")
+                            } else {
+                                format!("{:>10x}", u32::from_le_bytes(b))
+                            }
+                        })
+                        .collect();
+                    println!("{pad}  {:4x}: {}", k * 32, words.join(" "));
+                }
+            }
+        });
     }
     Ok(())
 }
@@ -1483,5 +2757,460 @@ fn eyes(ar: &mut archive::Archive) -> anyhow::Result<()> {
         v.truncate(8);
         println!("{k}: {v:?}");
     }
+    Ok(())
+}
+
+/// Paldea's resident scenes' models (`maps::overworlds`): per part, its material, size, vertex colours, and how its
+/// surface lies against the terrain under it (water y - ground y, over the vertices that have ground).
+pub fn water_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use three_d::Transform;
+    let ground = Ground::load(ar);
+    println!("{} tiles of ground", ground.0.len());
+    for label in maps::overworlds().remove(0).resident {
+        let c = match scene::load_content(ar, &label) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("== {label}: FAILED {e:#}");
+                continue;
+            }
+        };
+        println!(
+            "== {label}: {} placements, {} instance files",
+            c.placements.len(),
+            c.instancers.len()
+        );
+        for p in &c.placements {
+            let m = match model::load(ar, &p.model, 0) {
+                Ok(m) => m,
+                Err(e) => {
+                    println!("  {}: FAILED {e:#}", p.model);
+                    continue;
+                }
+            };
+            println!("  {} ({} parts)", p.model, m.submeshes.len());
+            for s in &m.submeshes {
+                let shader = m
+                    .materials
+                    .get(&s.material)
+                    .map_or("?", |x| x.shader.as_str());
+                let mut used = vec![false; s.positions.len()];
+                for i in &s.indices {
+                    used[*i as usize] = true;
+                }
+                let (mut ylo, mut yhi) = (f32::MAX, f32::MIN);
+                let mut dys = Vec::new();
+                let mut holes = 0;
+                let mut col = [0.0f64; 4];
+                let mut amin = 1.0f32;
+                let mut n = 0;
+                for (v, q) in s.positions.iter().enumerate() {
+                    if !used[v] {
+                        continue;
+                    }
+                    n += 1;
+                    let w = p
+                        .matrix
+                        .transform_point(three_d::Point3::new(q[0], q[1], q[2]));
+                    ylo = ylo.min(w.y);
+                    yhi = yhi.max(w.y);
+                    match ground.at(w.x, w.z) {
+                        Some(g) => dys.push(w.y - g),
+                        None => holes += 1,
+                    }
+                    if let Some(cs) = &s.colors {
+                        for k in 0..4 {
+                            col[k] += cs[v][k] as f64;
+                        }
+                        amin = amin.min(cs[v][3]);
+                    }
+                }
+                dys.sort_by(f32::total_cmp);
+                let q = |f: f32| {
+                    dys.get(((dys.len() as f32 - 1.0) * f) as usize)
+                        .copied()
+                        .unwrap_or(f32::NAN)
+                };
+                let above = dys.iter().filter(|d| **d > -0.25).count();
+                let nn = n.max(1) as f64;
+                println!(
+                    "    {:40} {:38} {shader:8} {:5} tris  y {ylo:8.2}..{yhi:8.2}  ground {}/{n} (holes {holes}):                      dy p10 {:7.2} p50 {:7.2} p90 {:7.2}, {:.0}% above  colour {}",
+                    s.shape,
+                    s.material,
+                    s.indices.len() / 3,
+                    dys.len(),
+                    q(0.1),
+                    q(0.5),
+                    q(0.9),
+                    100.0 * above as f32 / dys.len().max(1) as f32,
+                    if s.colors.is_some() {
+                        format!(
+                            "mean {:.2} {:.2} {:.2} {:.2}, min a {amin:.2}",
+                            col[0] / nn,
+                            col[1] / nn,
+                            col[2] / nn,
+                            col[3] / nn
+                        )
+                    } else {
+                        "none".into()
+                    }
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every `terrain_XX_YY` tile of any grid (XX, YY up to 99): origin, sample grid, height range, holes.
+pub fn map_tiles(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    for x in 0..100 {
+        for y in 0..100 {
+            let path = terrain::tile_path(x, y);
+            if !ar.contains(&path) {
+                continue;
+            }
+            match terrain::load_heights(ar, &path) {
+                Ok(t) => {
+                    let solid: Vec<f32> = t.heights.iter().copied().filter(|v| *v != 0.0).collect();
+                    let (lo, hi) = solid
+                        .iter()
+                        .fold((f32::MAX, f32::MIN), |(a, b), v| (a.min(*v), b.max(*v)));
+                    println!(
+                        "{x:02}_{y:02}: origin {:?} cell {:?} {}x{} heights {lo:.1}..{hi:.1} holes {}",
+                        t.origin,
+                        t.scale,
+                        t.width,
+                        t.depth,
+                        t.heights.len() - solid.len()
+                    );
+                }
+                Err(e) => println!("{x:02}_{y:02}: FAILED {e:#}"),
+            }
+        }
+    }
+    // each map's grid formulas against the files: origin, tile under the tile's centre
+    for map in maps::overworlds() {
+        let Some(g) = map.grid else { continue };
+        let (mut ok, mut bad) = (0, 0);
+        for (x, y, path) in g.tiles(ar) {
+            let Ok(t) = terrain::load_heights(ar, &path) else {
+                continue;
+            };
+            let (ox, oz) = g.origin(x, y);
+            let fits = (ox - t.origin[0]).abs() < 0.01
+                && (oz - t.origin[2]).abs() < 0.01
+                && g.tile_at(ox + 250.0, oz + 250.0) == Some((x, y));
+            if fits {
+                ok += 1;
+            } else {
+                bad += 1;
+                println!(
+                    "{}: {x:02}_{y:02} grid says ({ox}, {oz}), file {:?}",
+                    map.name, t.origin
+                );
+            }
+        }
+        println!("{}: {ok} tiles fit the grid, {bad} do not", map.name);
+    }
+    Ok(())
+}
+
+/// Every room `maps::rooms` finds: its content with sub-scenes, the models placed and whether they load.
+pub fn rooms_check(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    let rooms = maps::rooms(ar);
+    let (mut empty, mut failed) = (0, 0);
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    for (code, path) in &rooms {
+        match scene::load_content(ar, path) {
+            Ok(c) => {
+                let bad = c
+                    .placements
+                    .iter()
+                    .filter(|p| model::load(ar, &p.model, 0).is_err())
+                    .count();
+                failed += bad + c.errors.len();
+                if c.placements.is_empty() && c.instancers.is_empty() {
+                    empty += 1;
+                }
+                println!(
+                    "{code:40} {} models ({bad} fail), {} instance files, {} errors  {path}",
+                    c.placements.len(),
+                    c.instancers.len(),
+                    c.errors.len()
+                );
+                for e in &c.errors {
+                    // "sub-scene <path>: <error>": by the referenced file's extension and the error's last words
+                    let ext = e
+                        .split(':')
+                        .next()
+                        .and_then(|p| p.rsplit('.').next())
+                        .unwrap_or("?");
+                    let why = e.rsplit(':').next().unwrap_or("").trim();
+                    *kinds.entry(format!(".{ext}: {why}")).or_default() += 1;
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("{code:40} FAILED {e:#}");
+            }
+        }
+    }
+    for (k, n) in &kinds {
+        println!("{n:6} {k}");
+    }
+    println!(
+        "{} rooms, {empty} place nothing, {failed} failures",
+        rooms.len()
+    );
+    Ok(())
+}
+
+/// The Textures tab's catalogue over the whole dump (see `textures.rs`): folders and files per group, pack names
+/// whose path was not rebuilt; with `expand`, every folder's other textures; with `decode`, also decodes every
+/// texture listed and counts failures by format.
+fn texture_catalogue(ar: &mut archive::Archive, mode: Option<&str>) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let t = std::time::Instant::now();
+    let (mut folders, lost) = textures::catalogue(ar);
+    println!(
+        "catalogue: {} folders, {} named textures, {lost} pack names not rebuilt, {:.1} s",
+        folders.len(),
+        folders.iter().map(|f| f.files.len()).sum::<usize>(),
+        t.elapsed().as_secs_f32()
+    );
+    let expand = matches!(mode, Some("expand" | "decode"));
+    if expand {
+        let t = std::time::Instant::now();
+        let mut skipped = 0;
+        for f in folders.iter_mut() {
+            let (more, s) = textures::expand(ar, f);
+            skipped += s;
+            f.files.extend(more);
+            f.expanded = true;
+        }
+        println!(
+            "expanded in {:.1} s, {skipped} files unreadable",
+            t.elapsed().as_secs_f32()
+        );
+    }
+    for g in textures::Group::ALL {
+        let fs: Vec<&textures::Folder> = folders.iter().filter(|f| f.group == g).collect();
+        let files: usize = fs.iter().map(|f| f.files.len()).sum();
+        let named = fs
+            .iter()
+            .flat_map(|f| &f.files)
+            .filter(|f| f.path.is_some())
+            .count();
+        println!(
+            "{:12} {:5} folders {:6} textures ({named} with a path)",
+            g.label(),
+            fs.len(),
+            files
+        );
+        let mut big: Vec<&&textures::Folder> = fs.iter().collect();
+        big.sort_by_key(|f| std::cmp::Reverse(f.files.len()));
+        for f in big.iter().take(6) {
+            println!("    {:5}  {}", f.files.len(), f.label());
+        }
+    }
+    for f in folders.iter().filter(|f| f.path.is_empty()) {
+        for &pi in f.packs.iter().take(5) {
+            println!("not rebuilt: {}", ar.pack_names[pi as usize]);
+        }
+    }
+    if mode == Some("decode") {
+        let t = std::time::Instant::now();
+        let mut ok = 0;
+        let mut fails: BTreeMap<String, (usize, String)> = BTreeMap::new();
+        let mut formats: BTreeMap<String, usize> = BTreeMap::new();
+        for f in folders.iter().flat_map(|f| &f.files) {
+            let r = ar.read_hash(f.hash).and_then(|b| texture::decode_bntx(&b));
+            match r {
+                Ok(img) => {
+                    ok += 1;
+                    *formats.entry(img.format).or_default() += 1;
+                }
+                Err(e) => {
+                    let e = format!("{e:#}");
+                    let key = e.split(':').next().unwrap_or(&e).to_string();
+                    let entry = fails.entry(key).or_insert((0, f.name.clone()));
+                    entry.0 += 1;
+                }
+            }
+        }
+        println!(
+            "decoded {ok} in {:.0} s; formats {formats:?}",
+            t.elapsed().as_secs_f32()
+        );
+        for (e, (n, example)) in fails {
+            println!("  failed {n}: {e} (e.g. {example})");
+        }
+    }
+    Ok(())
+}
+
+/// The Wwise sounds (see `wwise.rs`): counts per group and codec, total length; with `decode`, decodes every
+/// `step`th sound and counts failures per codec (with an example).
+fn audio_survey(
+    romfs: &std::path::Path,
+    mode: Option<&str>,
+    step: Option<usize>,
+) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let t = std::time::Instant::now();
+    let (sounds, notes) = wwise::catalogue(romfs)?;
+    println!(
+        "{} sounds in {:.1} s",
+        sounds.len(),
+        t.elapsed().as_secs_f32()
+    );
+    for n in &notes {
+        println!("note: {n}");
+    }
+    for g in wwise::Group::ALL {
+        let gs: Vec<&wwise::Sound> = sounds.iter().filter(|s| s.group == g).collect();
+        if gs.is_empty() {
+            continue;
+        }
+        let mut codecs: BTreeMap<String, usize> = BTreeMap::new();
+        let mut secs = 0.0;
+        let mut loops = 0;
+        for s in &gs {
+            match &s.header {
+                Ok(h) => {
+                    *codecs.entry(h.codec.label()).or_default() += 1;
+                    secs += h.seconds();
+                    loops += h.looping.is_some() as usize;
+                }
+                Err(e) => *codecs.entry(format!("bad header: {e}")).or_default() += 1,
+            }
+        }
+        println!(
+            "{:15} {:6} sounds {:7.0} min, {loops} looped, {codecs:?}",
+            g.label(),
+            gs.len(),
+            secs / 60.0
+        );
+        let titled = gs.iter().filter(|s| s.title.is_some()).count();
+        let dev = gs.iter().filter(|s| s.dev_name.is_some()).count();
+        println!("                titles {titled}, developer names {dev}");
+        let named: Vec<&&wwise::Sound> = gs
+            .iter()
+            .filter(|s| s.title.is_some() || s.dev_name.is_some())
+            .collect();
+        for s in named.iter().step_by((named.len() / 5).max(1)).take(5) {
+            println!(
+                "                  {:>10}  {:30} {}",
+                s.id,
+                s.title.as_deref().unwrap_or(""),
+                s.dev_name.as_deref().unwrap_or("")
+            );
+        }
+    }
+    if mode == Some("names") {
+        for s in &sounds {
+            if s.title.is_some() || s.dev_name.is_some() {
+                println!(
+                    "{}	{}	{}	{}",
+                    s.group.label(),
+                    s.id,
+                    s.title.as_deref().unwrap_or(""),
+                    s.dev_name.as_deref().unwrap_or("")
+                );
+            }
+        }
+    }
+    if mode != Some("decode") {
+        return Ok(());
+    }
+    let step = step.unwrap_or(1).max(1);
+    let t = std::time::Instant::now();
+    let mut ok: BTreeMap<String, usize> = BTreeMap::new();
+    let mut fail: BTreeMap<String, (usize, String)> = BTreeMap::new();
+    let mut short = 0;
+    let mut secs: BTreeMap<String, (f32, f32)> = BTreeMap::new(); // codec: (decode time, audio length)
+    for s in sounds.iter().step_by(step) {
+        let t0 = std::time::Instant::now();
+        let codec = s
+            .header
+            .as_ref()
+            .map(|h| h.codec.label())
+            .unwrap_or_else(|_| "?".into());
+        match wwise::read(romfs, s).and_then(|b| wem::decode(&b)) {
+            Ok(pcm) => {
+                let e = secs.entry(codec.clone()).or_default();
+                e.0 += t0.elapsed().as_secs_f32();
+                e.1 += pcm.samples.len() as f32 / pcm.channels as f32 / pcm.rate as f32;
+                *ok.entry(codec).or_default() += 1;
+                if let Ok(h) = &s.header {
+                    let got = pcm.samples.len() / pcm.channels as usize;
+                    let want = (h.samples as u64 * pcm.rate as u64 / h.rate.max(1) as u64) as usize;
+                    if got + 2048 < want {
+                        short += 1;
+                    }
+                }
+            }
+            Err(e) => {
+                let e = format!("{e:#}");
+                let key = format!("{codec}: {}", e.chars().take(60).collect::<String>());
+                fail.entry(key)
+                    .or_insert((0, format!("{} {:08x}", s.file, s.id)))
+                    .0 += 1;
+            }
+        }
+    }
+    for (c, (t, len)) in &secs {
+        println!(
+            "  {c}: {t:.1} s to decode {len:.0} s of sound ({:.0}x real time)",
+            len / t.max(1e-6)
+        );
+    }
+    println!(
+        "decoded {ok:?} in {:.0} s; {short} came out shorter than their header says",
+        t.elapsed().as_secs_f32()
+    );
+    for (e, (n, ex)) in fail {
+        println!("  failed {n}: {e} (e.g. {ex})");
+    }
+    Ok(())
+}
+
+/// Every file in the packs whose name contains `filter` that holds `text` (as ASCII or UTF-16 LE): pack, file
+/// hash, size, offsets of the first matches. Packs are read whole, so a broad filter takes minutes.
+fn grep_archive(ar: &mut archive::Archive, text: &str, filter: &str) -> anyhow::Result<()> {
+    let ascii = text.as_bytes().to_vec();
+    let wide: Vec<u8> = text.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let packs: Vec<(u32, String)> = ar
+        .pack_names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| n.contains(filter))
+        .map(|(i, n)| (i as u32, n.clone()))
+        .collect();
+    println!("{} packs to search", packs.len());
+    let find = |hay: &[u8], needle: &[u8]| -> Vec<usize> {
+        hay.windows(needle.len())
+            .enumerate()
+            .filter(|(_, w)| *w == needle)
+            .map(|(i, _)| i)
+            .take(4)
+            .collect()
+    };
+    let mut hits = 0;
+    for (pi, name) in packs {
+        let Ok(hashes) = ar.pack_files_at(pi) else {
+            continue;
+        };
+        for h in hashes {
+            let Ok(b) = ar.read_hash(h) else { continue };
+            for (kind, needle) in [("ascii", &ascii), ("utf16", &wide)] {
+                let at = find(&b, needle);
+                if !at.is_empty() {
+                    hits += 1;
+                    println!("{name}  #{h:016x}  {} bytes  {kind} at {at:x?}", b.len());
+                }
+            }
+        }
+    }
+    println!("{hits} files");
     Ok(())
 }

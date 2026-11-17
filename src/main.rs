@@ -15,18 +15,30 @@
 
 mod anim;
 mod archive;
+mod audio;
 mod config;
 mod demo;
 mod eye;
 mod fb;
+mod gallery;
+mod instances;
+mod maps;
 mod materials;
 mod model;
 mod motion;
+mod msg;
+mod plants;
 mod player;
+mod scene;
 mod skeleton;
+mod sound_names;
 mod terrain;
 mod texture;
+mod textures;
+mod water;
+mod wem;
 mod world;
+mod wwise;
 
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
@@ -65,15 +77,21 @@ enum Category {
     Player,
     /// Not a list: the overworld terrain (see `world.rs`).
     World,
+    /// Not a model: every texture and sprite, by group (see `gallery.rs`).
+    Textures,
+    /// Not a model: music and sound effects (see `audio.rs`).
+    Sound,
 }
 
 impl Category {
-    const ALL: [Category; 5] = [
+    const ALL: [Category; 7] = [
         Category::Pokemon,
         Category::Trainers,
         Category::Props,
         Category::Player,
         Category::World,
+        Category::Textures,
+        Category::Sound,
     ];
 
     fn of(path: &str) -> Category {
@@ -93,7 +111,14 @@ impl Category {
             Category::Props => "Props",
             Category::Player => "Player",
             Category::World => "World",
+            Category::Textures => "Textures",
+            Category::Sound => "Sound",
         }
+    }
+
+    /// Tabs that fill the window with panels instead of the 3D view.
+    fn flat(self) -> bool {
+        matches!(self, Category::Textures | Category::Sound)
     }
 
     fn search_hint(self) -> &'static str {
@@ -101,7 +126,7 @@ impl Category {
             Category::Pokemon => "search, e.g. pm0025 or 0006",
             Category::Trainers => "search, e.g. karate or tr0080",
             Category::Props => "search, e.g. phone or ob0001",
-            Category::Player | Category::World => "",
+            Category::Player | Category::World | Category::Textures | Category::Sound => "",
         }
     }
 }
@@ -421,7 +446,12 @@ fn check(ar: &mut archive::Archive) {
         }
     }
     println!("{humans} trainers and NPCs: {no_skel} without a skeleton, {no_clips} without clips");
-    let tiles = terrain::tiles(ar);
+    // every map's tiles (Paldea, Kitakami, the Terarium)
+    let tiles: Vec<(i32, i32, String)> = maps::overworlds()
+        .into_iter()
+        .filter_map(|m| m.grid)
+        .flat_map(|g| g.tiles(ar))
+        .collect();
     let mut failed = 0;
     let mut layers_checked = false;
     for (_, _, path) in &tiles {
@@ -431,7 +461,14 @@ fn check(ar: &mut archive::Archive) {
             texture::decode_bntx(&ar.read(&m.splat_alpha)?)?;
             if !layers_checked {
                 let l = terrain::load_layers(ar, &m)?;
-                println!("{} ground texture layers", l.colors.len());
+                println!(
+                    "{} ground texture layers, {} normal layers",
+                    l.colors.len(),
+                    l.normals.len()
+                );
+                if l.normals.len() != l.colors.len() {
+                    anyhow::bail!("the normal layers did not load");
+                }
                 layers_checked = true;
             }
             Ok(())
@@ -445,6 +482,140 @@ fn check(ar: &mut archive::Archive) {
         "{} terrain tiles, {} loaded, {failed} failed",
         tiles.len(),
         tiles.len() - failed
+    );
+    // the tiles' trees: every listed instance file parses and every listed model loads
+    let (mut trees, mut tree_failed) = (0, 0);
+    let mut models: HashMap<String, bool> = HashMap::new();
+    for (_, _, path) in &tiles {
+        let list = match terrain::tile_instances(ar, path) {
+            Ok(l) => l,
+            Err(e) => {
+                tree_failed += 1;
+                println!("FAIL {path} tree list: {e:#}");
+                continue;
+            }
+        };
+        for (model_path, files) in list {
+            for f in files {
+                match ar.read(&f).and_then(|b| instances::parse(&b)) {
+                    Ok(ins) => trees += ins.matrices.len(),
+                    Err(e) => {
+                        tree_failed += 1;
+                        println!("FAIL {f}: {e:#}");
+                    }
+                }
+            }
+            if let std::collections::hash_map::Entry::Vacant(v) = models.entry(model_path) {
+                let ok = match model::load(ar, v.key(), 0) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tree_failed += 1;
+                        println!("FAIL {}: {e:#}", v.key());
+                        false
+                    }
+                };
+                v.insert(ok);
+            }
+        }
+    }
+    println!(
+        "{trees} trees of {} models on the tiles, {tree_failed} failures",
+        models.len()
+    );
+    // the streamed scenes of the towns and tiles: parse, every model loads, every instance file parses
+    let scenes = maps::field_scenes(ar);
+    let (mut placed, mut instanced, mut scene_failed) = (0, 0, 0);
+    for (label, path) in &scenes {
+        let c = match scene::load_content(ar, path) {
+            Ok(c) => c,
+            Err(e) => {
+                scene_failed += 1;
+                println!("FAIL scene {label}: {e:#}");
+                continue;
+            }
+        };
+        for e in &c.errors {
+            scene_failed += 1;
+            println!("FAIL scene {label}: {e}");
+        }
+        placed += c.placements.len();
+        let mut wanted: Vec<String> = c.placements.into_iter().map(|p| p.model).collect();
+        for scene::Instancer { model, file: f, .. } in c.instancers {
+            match ar.read(&f).and_then(|b| instances::parse(&b)) {
+                Ok(ins) => instanced += ins.matrices.len(),
+                Err(e) => {
+                    scene_failed += 1;
+                    println!("FAIL {f}: {e:#}");
+                }
+            }
+            wanted.push(model);
+        }
+        for m in wanted {
+            if let std::collections::hash_map::Entry::Vacant(v) = models.entry(m) {
+                let ok = match model::load(ar, v.key(), 0) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        scene_failed += 1;
+                        println!("FAIL {}: {e:#}", v.key());
+                        false
+                    }
+                };
+                v.insert(ok);
+            }
+        }
+    }
+    println!(
+        "{} streamed scenes: {placed} placed objects, {instanced} instances, {} models in all, {scene_failed} failures",
+        scenes.len(),
+        models.len()
+    );
+    // every map's resident scenes (water, outer scenery) and every room, with their sub-scenes: each placed
+    // model loads; "Water" parts counted
+    let mut resident: Vec<String> = maps::overworlds()
+        .into_iter()
+        .flat_map(|m| m.resident)
+        .collect();
+    let rooms = maps::rooms(ar);
+    resident.extend(rooms.iter().map(|(_, p)| p.clone()));
+    let (mut water_parts, mut placed, mut res_failed) = (0, 0, 0);
+    for path in &resident {
+        let c = match scene::load_content(ar, path) {
+            Ok(c) => c,
+            Err(e) => {
+                res_failed += 1;
+                println!("FAIL scene {path}: {e:#}");
+                continue;
+            }
+        };
+        for e in &c.errors {
+            res_failed += 1;
+            println!("FAIL {path}: {e}");
+        }
+        placed += c.placements.len();
+        for p in c.placements {
+            match model::load(ar, &p.model, 0) {
+                Ok(m) => {
+                    water_parts += m
+                        .submeshes
+                        .iter()
+                        .filter(|x| {
+                            m.materials
+                                .get(&x.material)
+                                .is_some_and(|y| y.shader == "Water")
+                        })
+                        .count()
+                }
+                Err(e) => {
+                    res_failed += 1;
+                    println!("FAIL {}: {e:#}", p.model);
+                }
+            }
+        }
+    }
+    println!(
+        "{} resident and room scenes ({} rooms): {placed} placed models, {water_parts} water parts, {res_failed} failures",
+        resident.len(),
+        rooms.len()
     );
 }
 
@@ -689,7 +860,11 @@ fn build(
                     (Shading::MaterialColours, _) => m.albedo = material_color(&s.material),
                     _ => {}
                 }
-                eye::ModelMaterial::Physical(Box::new(transparent_material(context, &m, alpha)))
+                let cutout = match alpha {
+                    materials::AlphaMode::Cutout(t) => Some(t),
+                    _ => None,
+                };
+                eye::ModelMaterial::physical(transparent_material(context, &m, alpha), cutout)
             })
             .clone();
         meshes.push(Gm::new(Mesh::new(context, &cpu), material));
@@ -735,6 +910,24 @@ fn build(
         skin,
         floor,
     }
+}
+
+/// The model view's Auto LOD: LOD 0 within 6 model radii of the camera, LOD 1 within 14, then LOD 2 (capped at
+/// the model's last). A switch needs the distance 15% past a boundary, so it does not flip back and forth (each
+/// switch reloads the model).
+fn auto_lod(radii: f32, current: usize, count: usize) -> usize {
+    const EDGES: [f32; 2] = [6.0, 14.0];
+    let pick = |r: f32| EDGES.iter().filter(|e| r >= **e).count();
+    let up = pick(radii / 1.15);
+    let down = pick(radii * 1.15);
+    let want = if up > current {
+        up
+    } else if down < current {
+        down
+    } else {
+        current
+    };
+    want.min(count.saturating_sub(1))
 }
 
 fn model_radius(model: &model::Model) -> f32 {
@@ -1087,7 +1280,14 @@ fn main() -> Result<()> {
                 && (*i == 0
                     || !matches!(
                         args[i - 1].as_str(),
-                        "--model" | "--anim" | "--tiles" | "--look"
+                        "--model"
+                            | "--anim"
+                            | "--tiles"
+                            | "--look"
+                            | "--camera"
+                            | "--map"
+                            | "--textures"
+                            | "--sound"
                     ))
         })
         .map(|(_, s)| s.as_str());
@@ -1101,10 +1301,13 @@ fn main() -> Result<()> {
     let mut romfs_error: Option<String> = None;
     let mut ar: Option<archive::Archive> = None;
     let mut romfs_shown = String::new();
+    // The RomFS that is open: the Textures tab's worker opens it again for itself.
+    let mut romfs_open: Option<PathBuf> = None;
     if let Some(p) = &romfs {
         match archive::Archive::open(p) {
             Ok(a) => {
                 config::save_romfs_path(p);
+                romfs_open = Some(p.clone());
                 romfs_shown = p.display().to_string();
                 ar = Some(a);
             }
@@ -1191,10 +1394,48 @@ fn main() -> Result<()> {
         .position(|a| a == "--tiles")
         .and_then(|i| args.get(i + 1))
         .cloned();
-    if args.iter().any(|a| a == "--world") || start_tiles.is_some() {
+    // --camera ex,ey,ez,tx,ty,tz: in the World view, where the camera stands and looks once the tiles loaded
+    let mut start_camera: Option<[f32; 6]> = args
+        .iter()
+        .position(|a| a == "--camera")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|v| {
+            let n: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            n.try_into().ok()
+        });
+    // --map Kitakami / Terarium / Paldea, or a room scene path: open the World tab on it
+    let mut start_map: Option<maps::Map> = args
+        .iter()
+        .position(|a| a == "--map")
+        .and_then(|i| args.get(i + 1))
+        .map(|name| {
+            maps::overworlds()
+                .into_iter()
+                .find(|m| m.name.eq_ignore_ascii_case(name))
+                .unwrap_or_else(|| maps::room(name.rsplit('/').next().unwrap_or(name), name))
+        });
+    if args.iter().any(|a| a == "--world") || start_tiles.is_some() || start_map.is_some() {
         category = Category::World;
     }
+    // The Textures tab: started (with its worker thread) when first opened.
+    let mut gallery: Option<gallery::Gallery> = None;
+    // The Sound tab: started (with its worker) when first opened; it keeps playing on other tabs.
+    let mut sound_tab: Option<audio::AudioTab> = None;
+    // --sound [group]: open the Sound tab, on the first group whose name contains [group] (e.g. music)
+    let mut start_sound_group: Option<String> = None;
+    if let Some(i) = args.iter().position(|a| a == "--sound") {
+        category = Category::Sound;
+        start_sound_group = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+    }
+    // --textures [folder]: open the Textures tab, on the first folder whose path contains [folder]
+    let mut start_folder: Option<String> = None;
+    if let Some(i) = args.iter().position(|a| a == "--textures") {
+        category = Category::Textures;
+        start_folder = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+    }
     let mut lod: usize = 0;
+    // Auto LOD in the model view: the LOD follows the camera's distance (see `auto_lod`)
+    let mut lod_auto = false;
     let mut shading = Shading::Textured;
     let mut normal_maps = true;
     let mut show_floor = true;
@@ -1262,6 +1503,9 @@ fn main() -> Result<()> {
                 Ok(a) => {
                     config::save_romfs_path(&p);
                     romfs_shown = p.display().to_string();
+                    romfs_open = Some(p.clone());
+                    gallery = None;
+                    sound_tab = None;
                     romfs_error = None;
                     models = all_models(&a);
                     motions = Motions::new(&a);
@@ -1286,7 +1530,7 @@ fn main() -> Result<()> {
                     pending = models.iter().position(|m| m.contains(&start_model)).or(
                         (!models.is_empty()).then_some(0),
                     );
-                    if category != Category::World {
+                    if category != Category::World && !category.flat() {
                         category = pending.map_or(Category::Pokemon, |i| Category::of(&models[i]));
                     }
                 }
@@ -1331,8 +1575,18 @@ fn main() -> Result<()> {
         // The World view: load one queued tile per frame; move the camera on entering and leaving the tab.
         let world_shown = category == Category::World;
         if world_shown {
+            // a map picked in the panel last frame: a new World (the old one's GPU data is dropped)
+            if let Some(m) = world.as_mut().and_then(|w| w.switch_to.take()) {
+                let mut w = world::World::new(arc, m);
+                w.request_shown();
+                world = Some(w);
+                world_was_shown = false;
+            }
             let w = world.get_or_insert_with(|| {
-                let mut w = world::World::new(arc);
+                let map = start_map
+                    .take()
+                    .unwrap_or_else(|| maps::overworlds().remove(0));
+                let mut w = world::World::new(arc, map);
                 if let Some(list) = &start_tiles {
                     w.show_only(list);
                 }
@@ -1342,9 +1596,16 @@ fn main() -> Result<()> {
             if std::mem::take(&mut world_rebuild) {
                 w.rebuild(&context);
             }
-            w.update(&context, arc);
-            if std::mem::take(&mut w.reframe) || !world_was_shown {
+            w.update(&context, arc, camera.position());
+            let loaded = std::mem::take(&mut w.reframe);
+            if loaded || !world_was_shown {
                 w.frame(&mut camera, &mut control);
+            }
+            if loaded && let Some(c) = start_camera.take() {
+                let target = vec3(c[3], c[4], c[5]);
+                camera.set_view(vec3(c[0], c[1], c[2]), target, vec3(0.0, 1.0, 0.0));
+                camera.set_perspective_projection(degrees(45.0), 0.1, 20000.0);
+                control = OrbitControl::new(target, 1.0, 20000.0);
             }
         } else if world_was_shown && let Some(c) = &current {
             frame_camera(&mut camera, &mut control, &c.model);
@@ -1552,7 +1813,15 @@ fn main() -> Result<()> {
                 jump: std::mem::take(&mut jump_queued),
             };
             let before = d.pos;
-            let pose = d.update(input, seconds, camera.view_direction(), skel.as_ref(), crossfade);
+            // the checker floor; the World view's terrain implements the same trait (`world::TerrainGround`)
+            let pose = d.update(
+                input,
+                seconds,
+                camera.view_direction(),
+                skel.as_ref(),
+                crossfade,
+                &demo::FlatGround,
+            );
             // the camera follows along the ground (not up and down, so jumps show against the view)
             let step = vec3(d.pos.x - before.x, 0.0, d.pos.z - before.z);
             camera.translate(step);
@@ -1622,15 +1891,30 @@ fn main() -> Result<()> {
             frame_input.device_pixel_ratio,
             |ui| {
                 let resp = egui::Panel::left("models").default_size(300.0).resizable(true).show_inside(ui, |ui| {
-                    ui.heading("Models");
+                    ui.heading(match category {
+                        Category::Textures => "Textures",
+                        Category::Sound => "Sound",
+                        _ => "Models",
+                    });
                     ui.horizontal(|ui| {
                         for c in Category::ALL {
                             ui.selectable_value(&mut category, c, c.label());
                         }
                     });
-                    if category == Category::World {
+                    let textures_shown = category == Category::Textures;
+                    if textures_shown {
+                        if let Some(p) = &romfs_open {
+                            gallery.get_or_insert_with(|| gallery::Gallery::new(p.clone(), start_folder.take())).left(ui);
+                        }
+                    } else if category == Category::Sound {
+                        if let Some(p) = &romfs_open {
+                            sound_tab
+                                .get_or_insert_with(|| audio::AudioTab::new(p.clone(), start_sound_group.take()))
+                                .left(ui);
+                        }
+                    } else if category == Category::World {
                         if let Some(w) = world.as_mut() {
-                            world_rebuild |= w.panel(ui, &mut camera, &mut control);
+                            world_rebuild |= w.panel(ui, arc, &mut camera, &mut control);
                         }
                         ui.horizontal(|ui| {
                             ui.radio_value(&mut lighting, Lighting::Unlit, "Unlit")
@@ -1677,7 +1961,7 @@ fn main() -> Result<()> {
                     ui.separator();
                     }
 
-                    if category != Category::World {
+                    if category != Category::World && !category.flat() {
                     ui.heading("Display");
                     let before = (shading, normal_maps);
                     ui.horizontal(|ui| {
@@ -1722,7 +2006,20 @@ fn main() -> Result<()> {
                     if let Some(c) = &current {
                         if c.model.mesh_files > 1 {
                             let mut l = lod;
-                            ui.add(egui::Slider::new(&mut l, 0..=c.model.mesh_files - 1).text("LOD"));
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(
+                                    !lod_auto,
+                                    egui::Slider::new(&mut l, 0..=c.model.mesh_files - 1).text("LOD"),
+                                );
+                                ui.checkbox(&mut lod_auto, "Auto").on_hover_text(
+                                    "Pick the LOD by the camera's distance: LOD 0 within 6 model radii,                                      LOD 1 within 14, then LOD 2",
+                                );
+                            });
+                            if lod_auto {
+                                let center = (Vec3::from(c.model.min) + Vec3::from(c.model.max)) * 0.5;
+                                let r = camera.position().distance(center) / model_radius(&c.model);
+                                l = auto_lod(r, lod, c.model.mesh_files);
+                            }
                             if l != lod {
                                 lod = l;
                                 if player_shown {
@@ -1911,7 +2208,13 @@ fn main() -> Result<()> {
                         ui.colored_label(egui::Color32::from_rgb(255, 120, 120), e);
                     }
                     ui.separator();
-                    ui.small("Left drag: orbit · Right drag: pan · Wheel: zoom · F7: play mode");
+                    ui.small(if category == Category::Sound {
+                        "Click: play · Up/Down: next/previous · Space: play/pause · Click the waveform: jump"
+                    } else if textures_shown {
+                        "Click: select · Double-click: open large · Arrows: next/previous · Ctrl+wheel: zoom · Esc: grid"
+                    } else {
+                        "Left drag: orbit · Right drag: pan · Wheel: zoom · F7: play mode"
+                    });
                     ui.separator();
                     ui.small(format!("RomFS: {romfs_shown}"));
                     if ui.small_button("Change RomFS folder…").clicked() {
@@ -1927,7 +2230,19 @@ fn main() -> Result<()> {
                   egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     if category == Category::World {
                         if let Some(w) = &world {
-                            w.details(ui);
+                            w.details(ui, control.target);
+                        }
+                        return;
+                    }
+                    if category == Category::Textures {
+                        if let Some(g) = gallery.as_mut() {
+                            g.details(ui);
+                        }
+                        return;
+                    }
+                    if category == Category::Sound {
+                        if let Some(t) = sound_tab.as_mut() {
+                            t.details(ui);
                         }
                         return;
                     }
@@ -2021,6 +2336,16 @@ fn main() -> Result<()> {
                   });
                 });
                 right_width = right.response.rect.width();
+                if category == Category::Textures
+                    && let Some(g) = gallery.as_mut()
+                {
+                    egui::CentralPanel::default().show_inside(ui, |ui| g.central(ui));
+                }
+                if category == Category::Sound
+                    && let Some(t) = sound_tab.as_mut()
+                {
+                    egui::CentralPanel::default().show_inside(ui, |ui| t.central(ui));
+                }
             },
         );
 
@@ -2038,7 +2363,7 @@ fn main() -> Result<()> {
                         continue;
                     }
                     match *kind {
-                        Key::F7 if category != Category::World => demo_toggle = true,
+                        Key::F7 if category != Category::World && !category.flat() => demo_toggle = true,
                         Key::Escape if demo.is_some() => demo_toggle = true,
                         k if demo.is_some() && DEMO_KEYS.contains(&k) => {
                             if k == Key::Space && !keys_held.contains(&k) {
@@ -2069,8 +2394,11 @@ fn main() -> Result<()> {
             height: frame_input.viewport.height,
         };
         camera.set_viewport(vp);
-        world::pan(&mut camera, &mut control, &mut frame_input.events);
-        control.handle_events(&mut camera, &mut frame_input.events);
+        let textures_shown = category.flat();
+        if !textures_shown {
+            world::pan(&mut camera, &mut control, &mut frame_input.events);
+            control.handle_events(&mut camera, &mut frame_input.events);
+        }
 
         let screen = frame_input.screen();
         screen.clear(ClearState::color_and_depth(0.13, 0.14, 0.17, 1.0, 1.0));
@@ -2083,7 +2411,7 @@ fn main() -> Result<()> {
                 Lighting::Lit => &lit,
             };
             w.render(&screen, &camera, lights);
-        } else if let Some(c) = &current {
+        } else if let (false, Some(c)) = (textures_shown, &current) {
             let floor = show_floor.then_some(match (&demo, &demo_floor) {
                 (Some(_), Some(f)) => &f.gm,
                 _ => &c.floor,
@@ -2105,7 +2433,7 @@ fn main() -> Result<()> {
             screen.render(&camera, meshes.chain(floor.map(|f| f as &dyn Object)), lights);
         }
         // Drawn after the mesh so that, in x-ray mode, it shows through it.
-        if let (true, false, Some((bones, joints))) = (show_skeleton, world_shown, &skel_gm) {
+        if let (true, false, false, Some((bones, joints))) = (show_skeleton, world_shown, textures_shown, &skel_gm) {
             screen.render(&camera, [bones as &dyn Object, joints as &dyn Object], &[]);
         }
         screen.write(|| gui.render()).ok();

@@ -36,7 +36,14 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 | `src/fb.rs` | schemaless, bounds-checked FlatBuffers reader (fields by slot index) |
 | `src/model.rs` | `.trmdl` / `.trmsh` / `.trmbf` (+ `.trmtr` slots) |
 | `src/materials.rs` | bakes `.trmtr` layers into one albedo + one normal map |
-| `src/texture.rs` | `.bntx` (BC1–7, ASTC, Tegra block-linear) |
+| `src/texture.rs` | `.bntx` (BC1–7, ASTC, raw and float formats, Tegra block-linear); `info` reads the header only |
+| `src/textures.rs` | the texture catalogue: pack names → paths (slash recovery), groups (UI, Pokédex, ...), folders, pack siblings |
+| `src/wwise.rs` | Wwise banks (`.bnk`: DIDX/DATA/HIRC) and packages (`.pck` AKPK) in `audio/wwise/bin/Switch/`; sound catalogue by group |
+| `src/wem.rs` | `.wem` header and decoders: PTADPCM, Wwise Vorbis (rebuilt for lewton, codebooks in `assets/`), Switch Opus (libopus), PCM |
+| `src/sound_names.rs` | names for sounds: event / state names from the game's audio tables matched by FNV-1 hash, HIRC walk (events → actions → music switches → tracks), menu titles and species from `msg.rs` |
+| `src/msg.rs` | the game's text: `message/dat/<language>/<name>.tbl` labels and `.dat` lines (decrypted) |
+| `src/audio.rs` | Sound tab: worker (catalogue, decode, waveform), rodio player with loop points, WAV export, user names |
+| `src/gallery.rs` | Textures tab: worker thread with its own `Archive`, thumbnail grid, single view (zoom, channels, layers) |
 | `src/skeleton.rs` | `.trskl`, rest pose vs. bind pose |
 | `src/anim.rs` | `.tranm` tracks, `_base.tracr` animation lists |
 | `src/demo.rs` | play mode (F7): locomotion blend space and jump states |
@@ -44,8 +51,13 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 | `src/eye.rs` | model materials: three-d physical, or the eye material (Pokémon eye highlight, shader `src/shaders/eye.frag`) |
 | `src/player.rs` | player character: part catalogue by slot, assembly of parts on the base skeleton |
 | `src/terrain.rs` | overworld terrain tiles: `.trtrr` and the height file in its pack |
+| `src/instances.rs` | `.trins` instance buffers (`SrtInstanceBuffer`: 4x4 matrices) |
+| `src/plants.rs` | World tab: placed models (trees, buildings, props) as instanced groups, draw distance |
+| `src/scene.rs` | `.trscn` scene trees: transforms, model and instance references; the overworld's streamed scenes |
+| `src/maps.rs` | the World tab's places: overworld maps (tile grids, scene folders, resident scenes) and room scenes found from pack names |
+| `src/water.rs` | World tab: the sea, rivers, lakes and waterfalls from each map's resident scenes; `WaterMaterial` (shader `src/shaders/water.frag`) |
 | `src/world.rs` | World tab: terrain meshes per tile, splat `TerrainMaterial` (shader `src/shaders/terrain.frag`), minimap panel, right-drag pan |
-| `src/config.rs` | remembers the RomFS path (`%APPDATA%\trinity-model-viewer\romfs_path.txt`) |
+| `src/config.rs` | remembers the RomFS path (`%APPDATA%\trinity-model-viewer\romfs_path.txt`) and the user's sound names (`sound_names.txt`) |
 | `src/bin/probe.rs` | dev tool: slot dumps of any archive file and whole-dump checks |
 
 ## Conventions
@@ -63,6 +75,9 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 ## Environment notes
 
 - Windows; Git Bash and PowerShell both available.
+- Opus decoding links libopus (`opus` crate). Without a system libopus it is built from source with CMake;
+  `.cargo/config.toml` sets `CMAKE_POLICY_VERSION_MINIMUM` so CMake 4 accepts it. CI installs `libopus-dev` and
+  `libasound2-dev` (rodio's audio output).
 - The user's dump is a RomFS **image** (`romfs.bin` + `index.json`), not a folder; `archive.rs` handles both.
   Its path is in the config file above, or set `TRINITY_ROMFS`.
 - `data.trpfs` is about 8 GB; reading the pack table is quick, but whole-dump probe runs take minutes, so run

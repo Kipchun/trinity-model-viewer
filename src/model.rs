@@ -5,6 +5,8 @@
 //!   MeshShape { 0: name, 1: bounds, 2: index type (0 u8, 1 u16, 2 u32), 3: [VertexAccessors],
 //!               4: [MaterialInfo {0: index count, 1: index offset, 3: material name}], 12: mesh name }
 //!   VertexAccessors { 0: [Attribute {1: semantic, 2: layer, 3: format, 4: byte offset}], 1: [{0: stride}] }
+//!   Semantics: 1 position, 2 normal, 3 tangent, 5 colour, 6 texcoord, 7 joints, 8 weights. Formats: 20 RGBA8
+//!   unorm, 22 RGBA8 uint, 39 RGBA16 unorm, 43 RGBA16 float, 48 RG32F, 51 RGB32F, 54 RGBA32F.
 //!   trmbf  { 1: [Buffer {0: [{0: index bytes}], 1: [{0: vertex bytes}] per accessor stream}] }
 //!   trmtr  { 1: [Material {0: name, 1: [Shader {0: name, 1: [{0: switch, 1: value string}]}], 2: [Texture {0: role, 1: .bntx file, 2: slot}],
 //!               4: [{0: name, 1: float}] (e.g. LayerMaskScale1), 7: [{0: name, 1: float4}] (e.g. UVScaleOffset,
@@ -19,6 +21,7 @@ use std::collections::HashMap;
 // Vertex attribute semantics
 const POSITION: u32 = 1;
 const NORMAL: u32 = 2;
+const COLOR: u32 = 5;
 const TEXCOORD: u32 = 6;
 const BLEND_INDICES: u32 = 7;
 const BLEND_WEIGHTS: u32 = 8;
@@ -29,6 +32,8 @@ pub struct SubMesh {
     pub positions: Vec<[f32; 3]>,
     pub normals: Option<Vec<[f32; 3]>>,
     pub uvs: Option<Vec<[f32; 2]>>,
+    /// Vertex colour, layer 0 (RGBA8 in the meshes seen). Water uses it for edge alpha and foam.
+    pub colors: Option<Vec<[f32; 4]>>,
     /// Skinning: up to four joints per vertex (indices into the skeleton's joint list) and their weights.
     pub joints: Option<Vec<[u8; 4]>>,
     pub weights: Option<Vec<[f32; 4]>>,
@@ -221,6 +226,7 @@ fn load_shape(shape: &Table, buffer: &Table) -> Result<Vec<SubMesh>> {
     let mut positions: Option<Vec<[f32; 3]>> = None;
     let mut normals = None;
     let mut uvs = None;
+    let mut colors: Option<Vec<[f32; 4]>> = None;
     let mut joints: Option<Vec<[u8; 4]>> = None;
     let mut weights: Option<Vec<[f32; 4]>> = None;
 
@@ -259,6 +265,9 @@ fn load_shape(shape: &Table, buffer: &Table) -> Result<Vec<SubMesh>> {
                     uvs = read_vec(data, stride, off, count, fmt)
                         .ok()
                         .map(|v| v.into_iter().map(|v| [v[0], v[1]]).collect());
+                }
+                COLOR if layer == 0 && colors.is_none() => {
+                    colors = read_vec(data, stride, off, count, fmt).ok();
                 }
                 // Joint indices: 4 x u8 (format 22), indices into the skeleton's joint list.
                 BLEND_INDICES if layer == 0 && joints.is_none() && fmt == 22 => {
@@ -332,6 +341,7 @@ fn load_shape(shape: &Table, buffer: &Table) -> Result<Vec<SubMesh>> {
             positions: positions.clone(),
             normals: normals.clone(),
             uvs: uvs.clone(),
+            colors: colors.clone(),
             joints: joints.clone(),
             weights: weights.clone(),
             indices,

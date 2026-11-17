@@ -1,4 +1,4 @@
-//! BNTX (Nintendo Switch texture container) to RGBA8. Only the first texture and mip level are read; any array
+//! BNTX (Nintendo Switch texture container) to RGBA8 (float formats clamped to 0..1). Only the first texture and mip level are read; any array
 //! layer can be (`decode_bntx_layer`).
 //!
 //! BNTX header: "BNTX" ... at 0x20 the "NX  " section: u32 texture count at 0x24, u64 offset of the BRTI pointer
@@ -48,6 +48,38 @@ fn brti_at(b: &[u8]) -> Result<usize> {
     Ok(brti)
 }
 
+/// What a BNTX holds, read from its headers without decoding any texels.
+pub struct Info {
+    /// The first texture's name (BRTI 0x60: u64 offset of a u16 length and the characters), e.g. `item_0183`.
+    pub name: String,
+    /// Textures in the file (the viewer shows the first).
+    pub textures: u32,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub mips: u16,
+    pub format: u32,
+}
+
+pub fn info(b: &[u8]) -> Result<Info> {
+    let brti = brti_at(b)?;
+    let name_at = u64_at(b, brti + 0x60)? as usize;
+    let len = u16_at(b, name_at)? as usize;
+    let name = b
+        .get(name_at + 2..name_at + 2 + len)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .unwrap_or_default();
+    Ok(Info {
+        name,
+        textures: u32_at(b, 0x24)?,
+        width: u32_at(b, brti + 0x24)?,
+        height: u32_at(b, brti + 0x28)?,
+        layers: u32_at(b, brti + 0x30)?.max(1),
+        mips: u16_at(b, brti + 0x16)?,
+        format: u32_at(b, brti + 0x1C)?,
+    })
+}
+
 /// Number of array layers of the first texture (1 for a plain 2D texture).
 pub fn layer_count(b: &[u8]) -> Result<u32> {
     Ok(u32_at(b, brti_at(b)? + 0x30)?.max(1))
@@ -88,6 +120,8 @@ pub fn decode_bntx_layer(b: &[u8], layer: u32) -> Result<Image> {
         0x09 => (Codec::Raw, 1, 1, 2, "R8G8"),
         0x0b => (Codec::Raw, 1, 1, 4, "R8G8B8A8"),
         0x0c => (Codec::Raw, 1, 1, 4, "B8G8R8A8"),
+        0x15 => (Codec::Raw, 1, 1, 8, "R16G16B16A16F"),
+        0x19 => (Codec::Raw, 1, 1, 16, "R32G32B32A32F"),
         0x1a => (Codec::Bc(1), 4, 4, 8, "BC1"),
         0x1b => (Codec::Bc(2), 4, 4, 16, "BC2"),
         0x1c => (Codec::Bc(3), 4, 4, 16, "BC3"),
@@ -136,6 +170,18 @@ pub fn decode_bntx_layer(b: &[u8], layer: u32) -> Result<Image> {
                 (0x02, _) => [c[0], c[0], c[0], 255],
                 (0x09, _) => [c[0], c[1], 0, 255],
                 (0x0c, _) => [c[2], c[1], c[0], c[3]],
+                // floats: clamped to 0..1 for display (light probes go past 1)
+                (0x15, _) => std::array::from_fn(|k| {
+                    unit(half(u16::from_le_bytes([c[2 * k], c[2 * k + 1]])))
+                }),
+                (0x19, _) => std::array::from_fn(|k| {
+                    unit(f32::from_le_bytes([
+                        c[4 * k],
+                        c[4 * k + 1],
+                        c[4 * k + 2],
+                        c[4 * k + 3],
+                    ]))
+                }),
                 _ => [c[0], c[1], c[2], c[3]],
             })
             .collect(),
@@ -177,6 +223,22 @@ pub fn decode_bntx_layer(b: &[u8], layer: u32) -> Result<Image> {
     })
 }
 
+/// IEEE half float to f32.
+fn half(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = (h >> 10) & 0x1f;
+    let man = (h & 0x3ff) as f32;
+    sign * match exp {
+        0 => man * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        e => (1.0 + man / 1024.0) * 2f32.powi(e as i32 - 15),
+    }
+}
+
+fn unit(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
 fn bgra(p: u32) -> [u8; 4] {
     let [b, g, r, a] = p.to_le_bytes();
     [r, g, b, a]
@@ -211,11 +273,28 @@ fn deswizzle(data: &[u8], w: usize, h: usize, bpp: usize, block_height_log2: u32
 /// The first texture as 32-bit float RGBA (format type 0x19; e.g. the terrain's `global_splatST_params.bntx`,
 /// 256 x 2, whose values are plausible only read this way). Returns width, height and row-major texels.
 pub fn decode_rgba32f(b: &[u8]) -> Result<(u32, u32, Vec<[f32; 4]>)> {
-    let brti = brti_at(b)?;
-    let format = u32_at(b, brti + 0x1C)?;
+    let (format, width, height, linear) = raw_texels(b, 16)?;
     if format >> 8 != 0x19 {
         bail!("texture format {format:#06x} is not RGBA32F");
     }
+    let texels = linear
+        .as_chunks::<16>()
+        .0
+        .iter()
+        .map(|c| {
+            std::array::from_fn(|k| {
+                f32::from_le_bytes([c[4 * k], c[4 * k + 1], c[4 * k + 2], c[4 * k + 3]])
+            })
+        })
+        .collect();
+    Ok((width, height, texels))
+}
+
+/// The first texture's first mip, deswizzled, as raw texels of `bpp` bytes, row-major. Returns the format code,
+/// width, height and bytes. For uncompressed formats the caller interprets (R16, R10G10B10A2, RGBA32F, ...).
+pub fn raw_texels(b: &[u8], bpp: usize) -> Result<(u32, u32, u32, Vec<u8>)> {
+    let brti = brti_at(b)?;
+    let format = u32_at(b, brti + 0x1C)?;
     let width = u32_at(b, brti + 0x24)? as usize;
     let height = u32_at(b, brti + 0x28)? as usize;
     if width == 0 || height == 0 || width > 16384 || height > 16384 {
@@ -227,16 +306,9 @@ pub fn decode_rgba32f(b: &[u8]) -> Result<(u32, u32, Vec<[f32; 4]>)> {
     let data = b
         .get(data_off..)
         .ok_or_else(|| anyhow!("texture data offset past the end"))?;
-    let linear = deswizzle(data, width, height, 16, blh_log2);
-    let texels = linear
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .map(|c| {
-            std::array::from_fn(|k| {
-                f32::from_le_bytes([c[4 * k], c[4 * k + 1], c[4 * k + 2], c[4 * k + 3]])
-            })
-        })
-        .collect();
-    Ok((width as u32, height as u32, texels))
+    if data.len() < width * height * bpp {
+        bail!("{width}x{height} texels of {bpp} bytes do not fit");
+    }
+    let linear = deswizzle(data, width, height, bpp, blh_log2);
+    Ok((format, width as u32, height as u32, linear))
 }
