@@ -57,6 +57,14 @@ Gotchas found while confirming:
 - Player parts index the **base** skeleton's joints (a bag's own `.trskl` has 4 joints, its meshes use joint 107),
   so they can only be shown on `p0_base.trskl`. The same holds for one `model_vr` head part.
 
+## Effects
+
+- Particle effects: `effect/<group>/.../<name>.ptcl`. Groups: `battle_cmn/`, `battle_eb/`, `battle_ee/eeNNN/`
+  (moves?), `battle_ej/` (raids: `ej_raid_bg00/`, ...), `applilastbattle/`, `applicooking/`, `applinet_battlespot/`,
+  `demo/evdNNNN/`, `field/nushi/flying/`, `field/gym/`, ... (`effect/` + up to 3 slashes; all 428 rebuild).
+- Animation effect lists: next to the clips, `pokemon/data/pmNNNN/pmNNNN_FF_VV/pmNNNN_FF_VV_<id>_<clip>.traef`
+  and `chara/motion_<group>/<code>_<name>/<code>_00_00<id>_<clip>.traef`.
+
 ## Area codes seen
 
 - `a_sch_*`: the academy (classrooms, dorms, cafe, office, entrance, grounds, studio, clubroom).

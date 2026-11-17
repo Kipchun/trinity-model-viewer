@@ -276,6 +276,11 @@ impl Archive {
         Table::root(pack, 0)?.u64s(0)
     }
 
+    /// Stored size in bytes of pack `pi` (an index into `pack_names`), as packed in `data.trpfs`.
+    pub fn pack_size(&self, pi: u32) -> u64 {
+        self.pack_size.get(pi as usize).copied().unwrap_or(0)
+    }
+
     /// Index of the pack that holds the file whose path hashes to `h`.
     pub fn pack_of(&self, h: u64) -> Option<u32> {
         self.file_pack.get(&h).copied()

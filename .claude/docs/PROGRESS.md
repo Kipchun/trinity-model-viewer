@@ -279,6 +279,44 @@ Update this file at the end of each work session: move items between sections, a
 - Probe: `--grep <text> [pack filter]` (search unpacked file contents), `--audio names`.
 - Next for names: moves (`PM_SKILLS`), Pokémon sounds, the remaining music.
 
+### Effects tab: list of particle effects (2026-11-16, not committed yet)
+- **Effects** tab (`--effects`): every `.ptcl` (428) and `.traef` (518) pack as a table (name, kind, group,
+  folder, pack size). Sort by clicking a column title (again to reverse), filter by kind and group (Battle 292,
+  Field 33, Menus 63, Cutscenes 40, Pokémon 485, Characters 33), find by name or folder. The right panel shows the
+  path (with **Copy path**) and what the file is. Nothing is decoded or played yet.
+- `src/effects.rs` (catalogue, no UI; shares `textures::recover` for the slashes), `src/effects_tab.rs` (UI).
+  All 946 paths rebuilt from the pack names in 0.02 s (`probe --effects`).
+- `.ptcl` is Nintendo's VFXB (version 0x16), not a Game Freak format: emitter sets, emitters, embedded BNTX
+  textures, primitives, compiled shaders. See FORMATS.md.
+
+### Effects: particle playback, step 1 (2026-11-16, not committed yet)
+- Double-click a particle effect (or **View**) in the Effects tab: it plays in the 3D view. Left panel: **Back to
+  list**, Play/Pause, Restart, Loop, speed, effect picker (files with several sets), one checkbox per emitter
+  (child emitters indented, blend shown). `--effects <name>` opens the first match.
+- `src/vfxb.rs`: section tree (ESTA > ESET > EMTR with child emitters, GRTF + GTNT, ...) and the 0xAC0-byte
+  emitter block; offsets in its doc comment. Field order from KillzXGaming's EffectLibrary (MIT), offsets checked
+  on the dump. `probe --vfxb`: **428 files, 0 failures, 2594 emitters (436 children), all 4957 sampler textures
+  found in the file's BNTX** (GTNT name = BNTX texture name); all key tables valid (counts <= 8, times sorted
+  in 0..1).
+- `src/particles.rs` + `shaders/particle.frag`: CPU simulation at 60 frames/s (start, duration, rate, interval,
+  16 volume shapes, outward + directional speed with spread, gravity, air resistance, life, scale + random +
+  scale keys, colour 0 / alpha 0 fixed or keyed, emitter colour, colour scale, Z rotation, child emitters on each
+  particle), quads rebuilt each frame per emitter, blend alpha / add / subtract / screen / multiply, particle
+  types billboard / Y billboard / XY / XZ polygon / along velocity. Texture 0 only, with sprite sheets
+  (columns x rows), pattern animation (fit to life, clamp, loop, random), UV scale and scroll. Camera framed on
+  where the particles go in the first 2 s.
+- Learned while looking: sampler wrap 0 = **mirror**, and those textures are a quarter of the image shown over
+  UV 0..2 (glows, rings, shockwaves); 1 repeat, 2 clamp. Textures with no alpha on alpha-blended emitters are
+  masks (shape in red, other shapes in green): drawn as red = alpha, white colour. BC4 / R8 textures likewise.
+- `texture.rs`: `texture_names` and `decode_bntx_texture(b, index, layer)` (a BNTX can hold many textures).
+- Looks right in shape and timing (checked: `cmn_land_smoke_m` landing puff, `ee003_star` glow + shards +
+  sparkles), not exact: the game's colour combiners (how colour 1, alpha 1 and textures 1-2 mix) are not read.
+- Next for effects: (1) **mesh particles** (particle type 6/7 and volume 15 use `G3PR` primitives, a BFRES;
+  `star_A_01` shows as squares now); (2) the combiner: colour 1 / alpha 1 and textures 1-2 (`CUDP`/`CSDP`
+  attribute blocks and the shader index may say how); (3) the remaining fields: rotation on X/Y, emitter
+  follow types, emission over distance, `FCOL` / `FRND` / `CADP` blocks (fields: colour, random, ...);
+  (4) `.traef` events to play effects on Pokémon / character animations; (5) a floor or a model to show scale.
+
 ## In flight
 
 - Commit the play-mode work (waiting on the user).

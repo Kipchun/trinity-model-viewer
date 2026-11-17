@@ -69,7 +69,7 @@ The viewer reads it in place and never changes it.
   lakes** show the game's water: the sea at 27 m with its coast waves, and every river, lake, pond and waterfall,
   with scrolling ripples and foam (an approximation of the game's water shader). Area Zero is a hole in the
   terrain: it has its own models, which are not placed yet.
-- **Textures** (the last tab): every texture and sprite in the game, in groups: **UI & icons** (item, type,
+- **Textures** (the tab after World): every texture and sprite in the game, in groups: **UI & icons** (item, type,
   ribbon and move icons, map pictures, picnic menus, ...), **Pokédex** (capture pictures), **Pokémon** (menu icons
   and every model's textures), **Characters**, **Field**, **Effects**, **Environment** and **Cutscenes**. Pick a
   folder on the left (the search finds folders and file names, e.g. `pm0025` or `item_0001`); its textures show as
@@ -78,7 +78,7 @@ The viewer reads it in place and never changes it.
   1:1 or any zoom (also Ctrl + wheel), the colour channels alone (R, G, B, A), a checker, dark or light
   background, sharp or smooth enlargement, and the layers of array textures. The arrow keys step through the
   folder, Esc goes back to the grid.
-- **Sound** (the last tab): the game's music and sound effects, 17,512 sounds in groups: **Music**, **Jingles**,
+- **Sound** (the tab after Textures): the game's music and sound effects, 17,512 sounds in groups: **Music**, **Jingles**,
   **Pokémon cries**, **Pokémon sounds**, **Moves**, **Battle**, **Menus**, **Player**, **People**, **Objects**,
   **Ambience**, **Cutscenes** and **Common**. Sounds are listed by id (the number Wwise tools use for `.wem` file
   names) with length, channels, rate, codec and a name where one is known: the song titles from the game's own
@@ -90,6 +90,13 @@ The viewer reads it in place and never changes it.
   and pauses, and a click on the waveform jumps there. **Loop** repeats the sound, between its loop points where it
   has them (most music loops through the game's music playlists, which are not read, so it repeats whole).
   **Save as WAV…** writes the decoded sound wherever you choose. Sound keeps playing when you switch tabs.
+- **Effects** (the last tab): a list of the game's particle effects (428, the battle, raid, field, menu and
+  cutscene effects) and of the effect lists attached to Pokémon and character animations (518). Click a column
+  title to sort by name, kind, group, folder or size (click again to reverse); filter by kind and group, or type
+  in **find**. Double-click a particle effect (or pick it and press **View**) to play it in the 3D view: Play /
+  Pause, Restart, Loop and speed on the left, and a checkbox per emitter to see what each part does; **Back to
+  list** returns to the table. Effects look close to the game, not exact: parts drawn with meshes show as flat
+  squares, and the game's colour mixing is approximated.
 - **Right panel**: the model's files, parts and materials, and its skeleton as a tree; click a bone to highlight it
   and see its transform.
 - **Mouse**: left drag orbits, right drag pans, the wheel zooms.
@@ -105,6 +112,7 @@ Command-line options:
 | `--tiles 05_03,06_03` | start in the World tab showing only these terrain tiles |
 | `--map Kitakami` | start in the World tab on a map: `Paldea`, `Kitakami`, `Terarium`, or a room scene's path |
 | `--sound [group]` | start in the Sound tab, optionally on a group (e.g. `music`, `cries`) |
+| `--effects [name]` | start in the Effects tab, optionally playing the first particle effect whose name contains this text (e.g. `ee003_star`) |
 | `--textures [folder]` | start in the Textures tab, optionally on the first folder whose path contains this text (e.g. `icon_item`) |
 | `--anim walk01` | start the first animation whose name contains this text |
 | `--look head` | put the camera close in front of this bone (first bone whose name contains the text) |

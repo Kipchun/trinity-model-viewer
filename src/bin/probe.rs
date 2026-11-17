@@ -31,6 +31,8 @@
 //!   cargo run --release --bin probe -- --texture <bntx> <layer> <out>  decoded RGBA8 of one layer (raw, for study)
 //!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
 //!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
+//!   cargo run --release --bin probe -- --vfxb [path]          every .ptcl parsed: field value counts, textures found; or one file's emitters
+//!   cargo run --release --bin probe -- --effects               the Effects tab's list: counts by kind and group, paths not rebuilt
 //!   cargo run --release --bin probe -- --characters            list the character models discovery finds
 //!   cargo run --release --bin probe -- --material <trmdl> <name part>  every field of the matching materials
 //!   cargo run --release --bin probe -- --eyes                  Eye / EyeClearCoat materials: highlight switches and values
@@ -53,6 +55,8 @@ mod anim;
 mod archive;
 #[path = "../config.rs"]
 mod config;
+#[path = "../effects.rs"]
+mod effects;
 #[path = "../fb.rs"]
 mod fb;
 #[path = "../instances.rs"]
@@ -81,6 +85,8 @@ mod terrain;
 mod texture;
 #[path = "../textures.rs"]
 mod textures;
+#[path = "../vfxb.rs"]
+mod vfxb;
 #[path = "../wem.rs"]
 mod wem;
 #[path = "../wwise.rs"]
@@ -551,6 +557,12 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--textures" {
         return texture_catalogue(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--vfxb" {
+        return vfxb_check(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--effects" {
+        return effect_catalogue(&ar);
     }
     if args[0] == "--characters" {
         for p in ar.character_models() {
@@ -3212,5 +3224,205 @@ fn grep_archive(ar: &mut archive::Archive, text: &str, filter: &str) -> anyhow::
         }
     }
     println!("{hits} files");
+    Ok(())
+}
+
+/// The effect catalogue (`effects::catalogue`): counts by kind and group, and every name whose path was not rebuilt.
+pub fn effect_catalogue(ar: &archive::Archive) -> anyhow::Result<()> {
+    let t = std::time::Instant::now();
+    let (list, lost) = effects::catalogue(ar);
+    let mut counts: std::collections::BTreeMap<(effects::Kind, effects::Group), usize> =
+        Default::default();
+    for e in &list {
+        *counts.entry((e.kind, e.group)).or_default() += 1;
+    }
+    for ((k, g), n) in &counts {
+        println!("{:<12} {:<11} {n}", k.label(), g.label());
+    }
+    for e in list.iter().filter(|e| e.path.is_none()) {
+        println!("not rebuilt: {}", ar.pack_names[e.pack as usize]);
+    }
+    println!(
+        "{} effects, {lost} paths not rebuilt, {:.2} s",
+        list.len(),
+        t.elapsed().as_secs_f32()
+    );
+    Ok(())
+}
+
+/// Parses every `.ptcl` the effect list names (or the one given) and counts what the emitter fields hold, so the
+/// offsets in `vfxb.rs` can be checked over the whole dump.
+pub fn vfxb_check(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let paths: Vec<String> = match one {
+        Some(p) => vec![p.to_string()],
+        None => effects::catalogue(ar)
+            .0
+            .into_iter()
+            .filter(|e| e.kind == effects::Kind::Particles)
+            .filter_map(|e| e.path)
+            .collect(),
+    };
+    let mut hist: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut add =
+        |k: &'static str, v: String| *hist.entry(k).or_default().entry(v).or_default() += 1;
+    let (mut files, mut failed, mut emitters, mut tex_ok, mut tex_missing) = (0, 0, 0, 0, 0);
+    for p in &paths {
+        files += 1;
+        let parsed = ar.read(p).and_then(|b| {
+            let f = vfxb::parse(&b)?;
+            let names: Vec<String> = match &f.bntx {
+                Some(r) => texture::texture_names(&b[r.clone()])?,
+                None => Vec::new(),
+            };
+            Ok((f, names))
+        });
+        let (f, names) = match parsed {
+            Ok(x) => x,
+            Err(e) => {
+                failed += 1;
+                println!("FAILED {p}: {e:#}");
+                continue;
+            }
+        };
+        let mut stack: Vec<(&vfxb::Emitter, usize)> = f
+            .sets
+            .iter()
+            .flat_map(|s| s.emitters.iter().map(|e| (e, 0)))
+            .collect();
+        while let Some((e, depth)) = stack.pop() {
+            emitters += 1;
+            stack.extend(e.children.iter().map(|c| (c, depth + 1)));
+            if one.is_some() {
+                println!(
+                    "{:indent$}{} life {}+{} rate {} every {} start {} dur {} once {} vol {} r {:?} blend {} type {} scale {:?}+{}% speed out {} dir {} {:?} grav {} {:?} colour {:?} {:?} alpha {} {:?} keys {:?}",
+                    "",
+                    e.name,
+                    e.life,
+                    e.life_random,
+                    e.rate,
+                    e.interval,
+                    e.start,
+                    e.duration,
+                    e.one_time,
+                    e.volume,
+                    e.volume_radius,
+                    e.blend,
+                    e.particle_type,
+                    e.scale,
+                    e.scale_random,
+                    e.speed_out,
+                    e.speed_dir,
+                    e.direction,
+                    e.gravity_scale,
+                    e.gravity_dir,
+                    e.color0_type,
+                    e.color0,
+                    e.alpha0,
+                    e.alpha0_type,
+                    e.key_counts,
+                    indent = depth * 2
+                );
+                for s in e.samplers.iter().filter(|s| s.has_texture()) {
+                    println!(
+                        "{:indent$}  texture {} pattern {} x{} every {} div {:?} uv {:?}",
+                        "",
+                        f.texture_names.get(&s.texture).map_or("?", String::as_str),
+                        s.pattern_type,
+                        s.frames,
+                        s.frames_per_step,
+                        s.div,
+                        s.uv_scale,
+                        indent = depth * 2
+                    );
+                }
+            }
+            add("blend", e.blend.to_string());
+            add("particle type", e.particle_type.to_string());
+            add("volume", e.volume.to_string());
+            add("colour0 type", format!("{:?}", e.color0_type));
+            add("alpha0 type", format!("{:?}", e.alpha0_type));
+            add("one time", e.one_time.to_string());
+            add("depth", depth.to_string());
+            add(
+                "life",
+                match e.life {
+                    i32::MIN..=0 => "<=0",
+                    1..=30 => "1-30",
+                    31..=120 => "31-120",
+                    121..=1000 => "121-1000",
+                    _ => ">1000",
+                }
+                .into(),
+            );
+            add(
+                "key counts ok",
+                e.key_counts.iter().all(|&k| k <= 8).to_string(),
+            );
+            let keys_sorted = [&e.color0_keys, &e.alpha0_keys, &e.scale_keys]
+                .iter()
+                .all(|k| {
+                    k.0.windows(2).all(|w| w[0].time <= w[1].time)
+                        && k.0.iter().all(|k| (0.0..=1.0).contains(&k.time))
+                });
+            add("key times sorted in 0..1", keys_sorted.to_string());
+            add(
+                "scale random %",
+                match e.scale_random {
+                    0.0 => "0",
+                    x if x <= 100.0 => "0-100",
+                    _ => ">100",
+                }
+                .into(),
+            );
+            add(
+                "speed random %",
+                match e.speed_random {
+                    0.0 => "0",
+                    x if x <= 100.0 => "0-100",
+                    _ => ">100",
+                }
+                .into(),
+            );
+            add("colour scale", format!("{:.1}", e.color_scale));
+            add(
+                "gravity dir len",
+                format!(
+                    "{:.1}",
+                    e.gravity_dir.iter().map(|v| v * v).sum::<f32>().sqrt()
+                ),
+            );
+            add(
+                "air resistance",
+                match e.air_resistance {
+                    0.0 => "0",
+                    x if x < 0.5 => "<0.5",
+                    x if x <= 1.0 => "0.5-1",
+                    _ => ">1",
+                }
+                .into(),
+            );
+            for (i, s) in e.samplers.iter().enumerate() {
+                if !s.has_texture() {
+                    continue;
+                }
+                add(
+                    ["pattern type 0", "pattern type 1", "pattern type 2"][i],
+                    s.pattern_type.to_string(),
+                );
+                add("sheet div", format!("{}x{}", s.div[0], s.div[1]));
+                match f.texture_names.get(&s.texture) {
+                    Some(n) if names.contains(n) => tex_ok += 1,
+                    _ => tex_missing += 1,
+                }
+            }
+        }
+    }
+    for (k, v) in &hist {
+        println!("{k}: {v:?}");
+    }
+    println!(
+        "{files} files, {failed} failed, {emitters} emitters; sampler textures found in the BNTX {tex_ok}, not found {tex_missing}"
+    );
     Ok(())
 }

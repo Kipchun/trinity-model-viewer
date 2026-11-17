@@ -71,7 +71,10 @@ clothing/body textures), `charamotion_*` (274, `.trmdt`, `.tracn`, `.tracr`), `c
 
 ## Phase 5: polish
 
-- Effects (`.ptcl`, `.traef`), emission/roughness, transparency sorting, material and face animations.
+- Effects: listed and played in the Effects tab (2026-11-16, `vfxb.rs`, `particles.rs`). Next: mesh particles
+  (`G3PR`), the colour combiners (colour 1, textures 1-2), then `.traef` events on Pokémon / character
+  animations.
+- Emission/roughness, transparency sorting, material and face animations.
 - Export (glTF) of whatever is loaded, for the user's own use. Keep exports out of the repo. Planned in detail in
   [EXPORT_PLAN.md](EXPORT_PLAN.md); its first steps (Pokémon) don't depend on the phases above, so it can start any time.
 - Performance: GPU skinning, instancing for vegetation, texture cache across models.

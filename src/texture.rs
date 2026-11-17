@@ -87,11 +87,39 @@ pub fn layer_count(b: &[u8]) -> Result<u32> {
 
 /// Decodes array layer `layer` of the first texture, first mip level.
 pub fn decode_bntx_layer(b: &[u8], layer: u32) -> Result<Image> {
+    decode_bntx_texture(b, 0, layer)
+}
+
+/// Names of every texture in a BNTX, in file order (BRTI 0x60: u64 offset of a u16 length and the characters).
+/// Effect files (`.ptcl`) keep all their textures in one BNTX.
+pub fn texture_names(b: &[u8]) -> Result<Vec<String>> {
     if !b.starts_with(b"BNTX") {
         bail!("not a BNTX file");
     }
+    let count = u32_at(b, 0x24)? as usize;
     let ptrs = u64_at(b, 0x28)? as usize;
-    let brti = u64_at(b, ptrs)? as usize;
+    (0..count.min(4096))
+        .map(|i| {
+            let brti = u64_at(b, ptrs + 8 * i)? as usize;
+            let name_at = u64_at(b, brti + 0x60)? as usize;
+            let len = u16_at(b, name_at)? as usize;
+            Ok(b.get(name_at + 2..name_at + 2 + len)
+                .map(|s| String::from_utf8_lossy(s).into_owned())
+                .unwrap_or_default())
+        })
+        .collect()
+}
+
+/// Decodes array layer `layer` of texture `index` of a BNTX, first mip level.
+pub fn decode_bntx_texture(b: &[u8], index: usize, layer: u32) -> Result<Image> {
+    if !b.starts_with(b"BNTX") {
+        bail!("not a BNTX file");
+    }
+    if index >= u32_at(b, 0x24)? as usize {
+        bail!("texture {index} not in this BNTX");
+    }
+    let ptrs = u64_at(b, 0x28)? as usize;
+    let brti = u64_at(b, ptrs + 8 * index)? as usize;
     if b.get(brti..brti + 4) != Some(b"BRTI") {
         bail!("BRTI block not found");
     }

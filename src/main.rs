@@ -18,6 +18,8 @@ mod archive;
 mod audio;
 mod config;
 mod demo;
+mod effects;
+mod effects_tab;
 mod eye;
 mod fb;
 mod gallery;
@@ -27,6 +29,7 @@ mod materials;
 mod model;
 mod motion;
 mod msg;
+mod particles;
 mod plants;
 mod player;
 mod scene;
@@ -35,6 +38,7 @@ mod sound_names;
 mod terrain;
 mod texture;
 mod textures;
+mod vfxb;
 mod water;
 mod wem;
 mod world;
@@ -81,10 +85,12 @@ enum Category {
     Textures,
     /// Not a model: music and sound effects (see `audio.rs`).
     Sound,
+    /// Not a model: the list of particle effects and animation effect lists (see `effects_tab.rs`).
+    Effects,
 }
 
 impl Category {
-    const ALL: [Category; 7] = [
+    const ALL: [Category; 8] = [
         Category::Pokemon,
         Category::Trainers,
         Category::Props,
@@ -92,6 +98,7 @@ impl Category {
         Category::World,
         Category::Textures,
         Category::Sound,
+        Category::Effects,
     ];
 
     fn of(path: &str) -> Category {
@@ -113,12 +120,16 @@ impl Category {
             Category::World => "World",
             Category::Textures => "Textures",
             Category::Sound => "Sound",
+            Category::Effects => "Effects",
         }
     }
 
     /// Tabs that fill the window with panels instead of the 3D view.
     fn flat(self) -> bool {
-        matches!(self, Category::Textures | Category::Sound)
+        matches!(
+            self,
+            Category::Textures | Category::Sound | Category::Effects
+        )
     }
 
     fn search_hint(self) -> &'static str {
@@ -126,7 +137,11 @@ impl Category {
             Category::Pokemon => "search, e.g. pm0025 or 0006",
             Category::Trainers => "search, e.g. karate or tr0080",
             Category::Props => "search, e.g. phone or ob0001",
-            Category::Player | Category::World | Category::Textures | Category::Sound => "",
+            Category::Player
+            | Category::World
+            | Category::Textures
+            | Category::Sound
+            | Category::Effects => "",
         }
     }
 }
@@ -1232,7 +1247,16 @@ const DEMO_KEYS: [Key; 9] = [
 ];
 
 fn frame_camera(camera: &mut Camera, control: &mut OrbitControl, model: &model::Model) {
-    let (min, max) = (Vec3::from(model.min), Vec3::from(model.max));
+    frame_bounds(
+        camera,
+        control,
+        Vec3::from(model.min),
+        Vec3::from(model.max),
+    );
+}
+
+/// Puts the camera in front of a box, at a distance that shows all of it.
+fn frame_bounds(camera: &mut Camera, control: &mut OrbitControl, min: Vec3, max: Vec3) {
     let center = (min + max) * 0.5;
     let radius = ((max - min).magnitude() * 0.5).max(0.01);
     let eye = center + vec3(0.6, 0.35, 1.0).normalize() * radius * 2.8;
@@ -1288,6 +1312,7 @@ fn main() -> Result<()> {
                             | "--map"
                             | "--textures"
                             | "--sound"
+                            | "--effects"
                     ))
         })
         .map(|(_, s)| s.as_str());
@@ -1421,6 +1446,14 @@ fn main() -> Result<()> {
     let mut gallery: Option<gallery::Gallery> = None;
     // The Sound tab: started (with its worker) when first opened; it keeps playing on other tabs.
     let mut sound_tab: Option<audio::AudioTab> = None;
+    // The Effects tab: its list is built from the pack names when first opened.
+    let mut effects_tab: Option<effects_tab::EffectsTab> = None;
+    // --effects [name]: open the Effects tab, playing the first particle effect whose name contains [name]
+    let mut start_effect: Option<String> = None;
+    if let Some(i) = args.iter().position(|a| a == "--effects") {
+        category = Category::Effects;
+        start_effect = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
+    }
     // --sound [group]: open the Sound tab, on the first group whose name contains [group] (e.g. music)
     let mut start_sound_group: Option<String> = None;
     if let Some(i) = args.iter().position(|a| a == "--sound") {
@@ -1506,6 +1539,7 @@ fn main() -> Result<()> {
                     romfs_open = Some(p.clone());
                     gallery = None;
                     sound_tab = None;
+                    effects_tab = None;
                     romfs_error = None;
                     models = all_models(&a);
                     motions = Motions::new(&a);
@@ -1786,6 +1820,17 @@ fn main() -> Result<()> {
 
         // Advance time and pose the skeleton.
         let seconds = frame_input.elapsed_time as f32 / 1000.0;
+        // The Effects tab: open an effect asked for last frame (framing the camera on it), and play it.
+        if category == Category::Effects {
+            let t = effects_tab.get_or_insert_with(|| effects_tab::EffectsTab::new(arc));
+            if let Some(q) = start_effect.take() {
+                t.request(&q);
+            }
+            if let Some((lo, hi)) = t.load(arc, &context) {
+                frame_bounds(&mut camera, &mut control, lo, hi);
+            }
+            t.update(seconds);
+        }
         if let (Some(a), true) = (anim.as_mut(), playing) {
             if !a.advance(seconds * speed, loop_anim) {
                 playing = false;
@@ -1894,6 +1939,7 @@ fn main() -> Result<()> {
                     ui.heading(match category {
                         Category::Textures => "Textures",
                         Category::Sound => "Sound",
+                        Category::Effects => "Effects",
                         _ => "Models",
                     });
                     ui.horizontal(|ui| {
@@ -1912,6 +1958,10 @@ fn main() -> Result<()> {
                                 .get_or_insert_with(|| audio::AudioTab::new(p.clone(), start_sound_group.take()))
                                 .left(ui);
                         }
+                    } else if category == Category::Effects {
+                        effects_tab
+                            .get_or_insert_with(|| effects_tab::EffectsTab::new(arc))
+                            .left(ui, &context);
                     } else if category == Category::World {
                         if let Some(w) = world.as_mut() {
                             world_rebuild |= w.panel(ui, arc, &mut camera, &mut control);
@@ -2210,6 +2260,8 @@ fn main() -> Result<()> {
                     ui.separator();
                     ui.small(if category == Category::Sound {
                         "Click: play · Up/Down: next/previous · Space: play/pause · Click the waveform: jump"
+                    } else if category == Category::Effects {
+                        "Click a row: details · Click a column title: sort"
                     } else if textures_shown {
                         "Click: select · Double-click: open large · Arrows: next/previous · Ctrl+wheel: zoom · Esc: grid"
                     } else {
@@ -2242,6 +2294,12 @@ fn main() -> Result<()> {
                     }
                     if category == Category::Sound {
                         if let Some(t) = sound_tab.as_mut() {
+                            t.details(ui);
+                        }
+                        return;
+                    }
+                    if category == Category::Effects {
+                        if let Some(t) = effects_tab.as_mut() {
                             t.details(ui);
                         }
                         return;
@@ -2346,6 +2404,11 @@ fn main() -> Result<()> {
                 {
                     egui::CentralPanel::default().show_inside(ui, |ui| t.central(ui));
                 }
+                if category == Category::Effects
+                    && let Some(t) = effects_tab.as_mut().filter(|t| !t.viewing())
+                {
+                    egui::CentralPanel::default().show_inside(ui, |ui| t.central(ui));
+                }
             },
         );
 
@@ -2394,7 +2457,12 @@ fn main() -> Result<()> {
             height: frame_input.viewport.height,
         };
         camera.set_viewport(vp);
-        let textures_shown = category.flat();
+        // the effect playing in the Effects tab, drawn instead of a model
+        let effect_view = match (category, &effects_tab) {
+            (Category::Effects, Some(t)) => t.view.as_ref(),
+            _ => None,
+        };
+        let textures_shown = category.flat() && effect_view.is_none();
         if !textures_shown {
             world::pan(&mut camera, &mut control, &mut frame_input.events);
             control.handle_events(&mut camera, &mut frame_input.events);
@@ -2411,6 +2479,8 @@ fn main() -> Result<()> {
                 Lighting::Lit => &lit,
             };
             w.render(&screen, &camera, lights);
+        } else if let Some(v) = effect_view {
+            v.render(&context, &screen, &camera);
         } else if let (false, Some(c)) = (textures_shown, &current) {
             let floor = show_floor.then_some(match (&demo, &demo_floor) {
                 (Some(_), Some(f)) => &f.gm,
@@ -2433,7 +2503,9 @@ fn main() -> Result<()> {
             screen.render(&camera, meshes.chain(floor.map(|f| f as &dyn Object)), lights);
         }
         // Drawn after the mesh so that, in x-ray mode, it shows through it.
-        if let (true, false, false, Some((bones, joints))) = (show_skeleton, world_shown, textures_shown, &skel_gm) {
+        if let (true, false, false, None, Some((bones, joints))) =
+            (show_skeleton, world_shown, textures_shown, effect_view, &skel_gm)
+        {
             screen.render(&camera, [bones as &dyn Object, joints as &dyn Object], &[]);
         }
         screen.write(|| gui.render()).ok();

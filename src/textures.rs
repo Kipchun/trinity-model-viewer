@@ -167,13 +167,13 @@ impl Folder {
 }
 
 /// Folders known so far: (collapsed form, real path with trailing `/`).
-struct Dirs {
+pub(crate) struct Dirs {
     known: Vec<(String, String)>,
     seen: HashSet<String>,
 }
 
 impl Dirs {
-    fn new() -> Dirs {
+    pub(crate) fn new() -> Dirs {
         let mut d = Dirs {
             known: Vec::new(),
             seen: HashSet::new(),
@@ -228,7 +228,7 @@ fn split_into(ar: &Archive, acc: &mut String, rest: &str, left: usize) -> bool {
 /// Rebuilds the path of `collapsed` (a pack name without `arc/` and `.trpak`): the longest known folders that it
 /// starts with are tried first, with up to 2 more slashes (3 below a folder one or two levels deep:
 /// `pokemon/data/` + `pm0001/pm0001_00_00/icon/pm0001_00_00_00.bntx`).
-fn recover(ar: &Archive, collapsed: &str, dirs: &mut Dirs) -> Option<String> {
+pub(crate) fn recover(ar: &Archive, collapsed: &str, dirs: &mut Dirs) -> Option<String> {
     let mut cands: Vec<(usize, String)> = dirs
         .known
         .iter()

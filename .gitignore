@@ -25,6 +25,8 @@ game/
 *.trins
 *.trcol
 *.trscn
+*.ptcl
+*.traef
 *.bfbs
 *.bnk
 *.pck
