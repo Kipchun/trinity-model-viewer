@@ -16,6 +16,7 @@
 mod anim;
 mod archive;
 mod audio;
+mod bfres;
 mod config;
 mod demo;
 mod effects;
@@ -29,6 +30,7 @@ mod materials;
 mod model;
 mod motion;
 mod msg;
+mod particle_gpu;
 mod particles;
 mod plants;
 mod player;
@@ -1313,6 +1315,8 @@ fn main() -> Result<()> {
                             | "--textures"
                             | "--sound"
                             | "--effects"
+                            | "--emitters"
+                            | "--frame"
                     ))
         })
         .map(|(_, s)| s.as_str());
@@ -1454,6 +1458,18 @@ fn main() -> Result<()> {
         category = Category::Effects;
         start_effect = args.get(i + 1).filter(|a| !a.starts_with("--")).cloned();
     }
+    // --emitters a,b: with --effects, only these emitters (by name) start switched on
+    let mut start_emitters: Option<Vec<String>> = args
+        .iter()
+        .position(|a| a == "--emitters")
+        .and_then(|i| args.get(i + 1))
+        .map(|l| l.split(',').map(str::to_string).collect());
+    // --frame n: with --effects, jump to frame n and pause (for looking at one moment)
+    let mut start_frame: Option<u32> = args
+        .iter()
+        .position(|a| a == "--frame")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|n| n.parse().ok());
     // --sound [group]: open the Sound tab, on the first group whose name contains [group] (e.g. music)
     let mut start_sound_group: Option<String> = None;
     if let Some(i) = args.iter().position(|a| a == "--sound") {
@@ -1828,6 +1844,16 @@ fn main() -> Result<()> {
             }
             if let Some((lo, hi)) = t.load(arc, &context) {
                 frame_bounds(&mut camera, &mut control, lo, hi);
+                if let (Some(names), Some(v)) = (start_emitters.take(), t.view.as_mut()) {
+                    for n in &mut v.nodes {
+                        n.enabled = names.contains(&n.em.name);
+                    }
+                }
+                if let (Some(f), Some(v)) = (start_frame.take(), t.view.as_mut()) {
+                    v.restart();
+                    v.advance(f);
+                    v.playing = false;
+                }
             }
             t.update(seconds);
         }

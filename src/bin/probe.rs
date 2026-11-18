@@ -31,6 +31,10 @@
 //!   cargo run --release --bin probe -- --texture <bntx> <layer> <out>  decoded RGBA8 of one layer (raw, for study)
 //!   cargo run --release --bin probe -- --splat                every tile's splat names vs. the layers its control map uses
 //!   cargo run --release --bin probe -- --splat-seams          do neighbouring control maps agree along shared edges?
+//!   cargo run --release --bin probe -- --vfxb-tree [path]     one .ptcl's section tree; or section paths over all of them
+//!   cargo run --release --bin probe -- --vfxb-blocks <magic> [n] every emitter attribute block of a type (FRND, EATR, EP02, ...) as words
+//!   cargo run --release --bin probe -- --vfxb-dump <out>      every emitter block + sampler formats, to <out>.bin / .txt (study outside the repo)
+//!   cargo run --release --bin probe -- --vfxb-prims [path]    every .ptcl's primitives (G3PR BFRES, G3NT) parsed and checked
 //!   cargo run --release --bin probe -- --vfxb [path]          every .ptcl parsed: field value counts, textures found; or one file's emitters
 //!   cargo run --release --bin probe -- --effects               the Effects tab's list: counts by kind and group, paths not rebuilt
 //!   cargo run --release --bin probe -- --characters            list the character models discovery finds
@@ -53,6 +57,8 @@
 mod anim;
 #[path = "../archive.rs"]
 mod archive;
+#[path = "../bfres.rs"]
+mod bfres;
 #[path = "../config.rs"]
 mod config;
 #[path = "../effects.rs"]
@@ -557,6 +563,140 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--textures" {
         return texture_catalogue(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--vfxb-prims" {
+        return vfxb_prims(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--vfxb-dump" {
+        // every emitter's raw data block (0xAC0 bytes) and the EMTR header before it, for study outside the repo:
+        // <out>.bin (records of 0x1000 bytes: 0x100 header area, then the block), <out>.txt (one line each)
+        let mut bin = Vec::new();
+        let mut txt = String::new();
+        for e in effects::catalogue(&ar).0 {
+            let (effects::Kind::Particles, Some(p)) = (e.kind, e.path) else {
+                continue;
+            };
+            let Ok(b) = ar.read(&p) else { continue };
+            // texture id -> BNTX format (BRTI +0x1C: format << 8 | type) and channel selectors (BRTI +0x58)
+            let mut formats: std::collections::HashMap<u64, (u32, u32)> = Default::default();
+            if let Ok(f) = vfxb::parse(&b)
+                && let Some(r) = &f.bntx
+            {
+                let x = &b[r.clone()];
+                let rd = |o: usize| {
+                    x.get(o..o + 8)
+                        .map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))
+                        as usize
+                };
+                let names = texture::texture_names(x).unwrap_or_default();
+                for (id, name) in &f.texture_names {
+                    if let Some(i) = names.iter().position(|n| n == name) {
+                        let brti = rd(rd(0x28) + 8 * i);
+                        let fm = x
+                            .get(brti + 0x1C..brti + 0x20)
+                            .map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()));
+                        let sel = x
+                            .get(brti + 0x58..brti + 0x5C)
+                            .map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()));
+                        formats.insert(*id, (fm, sel));
+                    }
+                }
+            }
+            for s in vfxb::sections(&b) {
+                let Some(d) = s.data.filter(|_| s.magic == "EMTR") else {
+                    continue;
+                };
+                let fmt: Vec<String> = (0..3)
+                    .map(|n| {
+                        let at = d + 0x9F0 + 0x20 * n;
+                        let id = b
+                            .get(at..at + 8)
+                            .map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()));
+                        formats
+                            .get(&id)
+                            .map_or("-".to_string(), |(f, c)| format!("{f:04x}/{c:08x}"))
+                    })
+                    .collect();
+                let mut rec = vec![0u8; 0x1000];
+                let h = s.at.min(b.len());
+                let hn = (d.saturating_sub(h)).min(0x100);
+                rec[..hn].copy_from_slice(&b[h..h + hn]);
+                let n = (b.len().saturating_sub(d)).min(0xAC0);
+                rec[0x100..0x100 + n].copy_from_slice(&b[d..d + n]);
+                bin.extend_from_slice(&rec);
+                txt.push_str(&format!(
+                    "{p}\t{}\t{}\t{}\n",
+                    s.depth,
+                    s.attr.is_some(),
+                    fmt.join(" ")
+                ));
+            }
+        }
+        std::fs::write(format!("{}.bin", args[1]), &bin)?;
+        std::fs::write(format!("{}.txt", args[1]), &txt)?;
+        println!("{} emitters", bin.len() / 0x1000);
+        return Ok(());
+    }
+    if args[0] == "--vfxb-blocks" {
+        // every emitter attribute block with this magic (e.g. FRND, EATR, EP02): owner, then the data as u32 / f32
+        let magic = args.get(1).map(String::as_str).unwrap_or("FRND");
+        let limit: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(40);
+        let mut shown = 0;
+        let mut sizes: std::collections::BTreeMap<u32, usize> = Default::default();
+        for e in effects::catalogue(&ar).0 {
+            let (effects::Kind::Particles, Some(p)) = (e.kind, e.path) else {
+                continue;
+            };
+            let Ok(b) = ar.read(&p) else { continue };
+            let mut owner = String::new();
+            for s in vfxb::sections(&b) {
+                if s.magic == "EMTR"
+                    && let Some(d) = s.data
+                {
+                    let n = b.get(d + 0x10..d + 0x50).unwrap_or(&[]);
+                    let end = n.iter().position(|&c| c == 0).unwrap_or(n.len());
+                    owner = String::from_utf8_lossy(&n[..end]).into_owned();
+                }
+                if s.magic != magic {
+                    continue;
+                }
+                let Some(d) = s.data else { continue };
+                let len = (s.size as usize).saturating_sub(d - s.at).min(0x400);
+                *sizes.entry(len as u32).or_default() += 1;
+                if shown >= limit {
+                    continue;
+                }
+                shown += 1;
+                let words: Vec<String> = (0..len / 4)
+                    .map(|i| {
+                        let o = d + 4 * i;
+                        let v = b
+                            .get(o..o + 4)
+                            .map_or(0, |x| u32::from_le_bytes(x.try_into().unwrap()));
+                        let f = f32::from_bits(v);
+                        if v == 0 {
+                            "0".into()
+                        } else if v < 0x10000 || v == u32::MAX {
+                            format!("#{v:x}")
+                        } else if f.is_finite() && f.abs() > 1e-6 && f.abs() < 1e7 {
+                            format!("{f:.4}")
+                        } else {
+                            format!("#{v:08x}")
+                        }
+                    })
+                    .collect();
+                println!(
+                    "{} | {owner} | {}",
+                    p.rsplit('/').next().unwrap_or(&p),
+                    words.join(" ")
+                );
+            }
+        }
+        println!("data sizes: {sizes:?}");
+        return Ok(());
+    }
+    if args[0] == "--vfxb-tree" {
+        return vfxb_tree(&mut ar, args.get(1).map(String::as_str));
     }
     if args[0] == "--vfxb" {
         return vfxb_check(&mut ar, args.get(1).map(String::as_str));
@@ -3250,6 +3390,275 @@ pub fn effect_catalogue(ar: &archive::Archive) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Checks the primitives of every `.ptcl` (or one): the BFRES parses, `G3NT` has one entry per model, its
+/// attribute map points at the expected attribute names, every emitter's primitive id is in the table.
+pub fn vfxb_prims(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let paths: Vec<String> = match one {
+        Some(p) => vec![p.to_string()],
+        None => effects::catalogue(ar)
+            .0
+            .into_iter()
+            .filter(|e| e.kind == effects::Kind::Particles)
+            .filter_map(|e| e.path)
+            .collect(),
+    };
+    let mut hist: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut add =
+        |k: &'static str, v: String| *hist.entry(k).or_default().entry(v).or_default() += 1;
+    let (mut files, mut failed, mut models, mut users, mut missing) = (0, 0, 0, 0, 0);
+    let expect = ["_p0", "_n0", "_t0", "_c0", "_u0", "_u1"];
+    for p in &paths {
+        let Ok(b) = ar.read(p) else { continue };
+        files += 1;
+        let f = match vfxb::parse(&b) {
+            Ok(f) => f,
+            Err(e) => {
+                println!("FAILED {p}: {e:#}");
+                failed += 1;
+                continue;
+            }
+        };
+        let list = match &f.bfres {
+            Some(r) => match bfres::parse(&b[r.clone()]) {
+                Ok(l) => l,
+                Err(e) => {
+                    println!("FAILED {p}: {e:#}");
+                    failed += 1;
+                    continue;
+                }
+            },
+            None => Vec::new(),
+        };
+        models += list.len();
+        add(
+            "G3NT entries == models",
+            (f.primitives.len() == list.len()).to_string(),
+        );
+        for (e, m) in f.primitives.iter().zip(&list) {
+            add("map length", e.map.len().to_string());
+            add("map bytes 6..8", format!("{:02x?}", e.map.get(6..8)));
+            let ok = e.map.iter().take(6).enumerate().all(|(k, &i)| {
+                i == 0xFF
+                    || m.attributes
+                        .get(i as usize)
+                        .is_some_and(|a| a.name == expect[k])
+            });
+            add("map matches attribute names", ok.to_string());
+            if one.is_some() || !ok {
+                println!(
+                    "{p}: {:#x} {} map {:02x?} attrs {:?} verts {} tris {}",
+                    e.id,
+                    m.name,
+                    e.map,
+                    m.attributes
+                        .iter()
+                        .map(|a| format!("{} {:#06x}", a.name, a.format))
+                        .collect::<Vec<_>>(),
+                    m.positions.len(),
+                    m.indices.len() / 3
+                );
+            }
+            add(
+                "primitive vertex counts",
+                match m.positions.len() {
+                    0..=4 => "<=4",
+                    5..=16 => "5-16",
+                    17..=100 => "17-100",
+                    101..=1000 => "101-1000",
+                    _ => ">1000",
+                }
+                .into(),
+            );
+            let lo = m.positions.iter().fold([f32::MAX; 3], |a, p| {
+                std::array::from_fn(|i| a[i].min(p[i]))
+            });
+            let hi = m.positions.iter().fold([f32::MIN; 3], |a, p| {
+                std::array::from_fn(|i| a[i].max(p[i]))
+            });
+            let flat = (0..3)
+                .filter(|&i| hi[i] - lo[i] < 1e-3)
+                .map(|i| ["x", "y", "z"][i])
+                .collect::<String>();
+            add(
+                "primitive flat along",
+                if flat.is_empty() { "-".into() } else { flat },
+            );
+            for a in &m.attributes {
+                add("attribute formats", format!("{} {:#06x}", a.name, a.format));
+            }
+        }
+        let mut stack: Vec<&vfxb::Emitter> =
+            f.sets.iter().flat_map(|s| s.emitters.iter()).collect();
+        while let Some(e) = stack.pop() {
+            stack.extend(e.children.iter());
+            if !e.has_primitive() {
+                add(
+                    "rotation axes used (quads)",
+                    (0..3)
+                        .filter(|&i| {
+                            e.rotation[i] != 0.0
+                                || e.rotation_random[i] != 0.0
+                                || e.rotation_add[i] != 0.0
+                        })
+                        .map(|i| ["x", "y", "z"][i])
+                        .collect::<String>(),
+                );
+                add(
+                    "spin kept 0x72C (quads)",
+                    format!("{:.3}", e.rotation_decay),
+                );
+            }
+            add(
+                "particle type (no primitive)",
+                if e.has_primitive() {
+                    None
+                } else {
+                    Some(e.particle_type)
+                }
+                .map_or("-".into(), |t| t.to_string()),
+            );
+            if !e.has_primitive() {
+                continue;
+            }
+            users += 1;
+            add("particle type (primitive)", e.particle_type.to_string());
+            add(
+                "spin kept 0x72C (primitive)",
+                format!("{:.3}", e.rotation_decay),
+            );
+            add(
+                "scale z (primitive)",
+                if e.scale[2] == 0.0 {
+                    "0"
+                } else if e.scale[2] == e.scale[0] {
+                    "= x"
+                } else {
+                    "other"
+                }
+                .into(),
+            );
+            add(
+                "scale keys z (primitive)",
+                if e.scale_keys.0.is_empty() {
+                    "none".into()
+                } else if e.scale_keys.0.iter().all(|k| k.value[2] == 0.0) {
+                    "all 0".into()
+                } else if e.scale_keys.0.iter().all(|k| k.value[2] == k.value[0]) {
+                    "= x".to_string()
+                } else {
+                    "other".into()
+                },
+            );
+            add(
+                "rotation axes used (primitive)",
+                (0..3)
+                    .filter(|&i| {
+                        e.rotation[i] != 0.0
+                            || e.rotation_random[i] != 0.0
+                            || e.rotation_add[i] != 0.0
+                            || e.rotation_add_random[i] != 0.0
+                    })
+                    .map(|i| ["x", "y", "z"][i])
+                    .collect::<String>(),
+            );
+            if let Some(i) = f.primitives.iter().position(|x| x.id == e.primitive)
+                && let Some(m) = list.get(i)
+            {
+                let lo = m.positions.iter().fold([f32::MAX; 3], |a, p| {
+                    std::array::from_fn(|i| a[i].min(p[i]))
+                });
+                let hi = m.positions.iter().fold([f32::MIN; 3], |a, p| {
+                    std::array::from_fn(|i| a[i].max(p[i]))
+                });
+                let flat = (0..3)
+                    .filter(|&i| hi[i] - lo[i] < 1e-3)
+                    .map(|i| ["x", "y", "z"][i])
+                    .collect::<String>();
+                add(
+                    "type / flat axis (primitive)",
+                    format!(
+                        "{} {}",
+                        e.particle_type,
+                        if flat.is_empty() { "-" } else { &flat }
+                    ),
+                );
+            }
+            if !f.primitives.iter().any(|x| x.id == e.primitive) {
+                missing += 1;
+                println!(
+                    "{p}: emitter {} primitive {:#x} not in G3NT",
+                    e.name, e.primitive
+                );
+            }
+        }
+    }
+    for (k, v) in &hist {
+        println!("{k}: {v:?}");
+    }
+    println!(
+        "{files} files, {failed} failed, {models} primitive models; {users} emitters use one, {missing} not found"
+    );
+    Ok(())
+}
+
+/// One `.ptcl`'s section tree; or, over every file, how often each section magic occurs (path) and which files hold
+/// primitives.
+pub fn vfxb_tree(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    if let Some(p) = one {
+        let b = ar.read(p)?;
+        for s in vfxb::sections(&b) {
+            let head: String = s
+                .data
+                .and_then(|d| b.get(d..d + 32))
+                .map(|x| x.iter().map(|c| format!("{c:02x}")).collect())
+                .unwrap_or_default();
+            println!(
+                "{:indent$}{} at {:#x} size {:#x} data {:?} attr {:?} children {}  {head}",
+                "",
+                s.magic,
+                s.at,
+                s.size,
+                s.data.map(|d| format!("{d:#x}")),
+                s.attr.map(|d| format!("{d:#x}")),
+                s.children,
+                indent = s.depth * 2
+            );
+        }
+        return Ok(());
+    }
+    let mut paths: BTreeMap<String, usize> = BTreeMap::new();
+    let mut with_prims = Vec::new();
+    for e in effects::catalogue(ar).0 {
+        let (effects::Kind::Particles, Some(p)) = (e.kind, e.path) else {
+            continue;
+        };
+        let Ok(b) = ar.read(&p) else { continue };
+        let mut stack: Vec<String> = Vec::new();
+        let mut prims = 0;
+        for s in vfxb::sections(&b) {
+            stack.truncate(s.depth);
+            stack.push(s.magic.clone());
+            *paths.entry(stack.join(">")).or_default() += 1;
+            if s.magic == "G3PR" || s.magic == "PRMA" {
+                prims += 1;
+            }
+        }
+        if prims > 0 {
+            with_prims.push((p, prims));
+        }
+    }
+    for (k, v) in &paths {
+        println!("{v:6} {k}");
+    }
+    println!("{} files with primitive sections", with_prims.len());
+    for (p, n) in with_prims.iter().take(30) {
+        println!("  {n} {p}");
+    }
+    Ok(())
+}
+
 /// Parses every `.ptcl` the effect list names (or the one given) and counts what the emitter fields hold, so the
 /// offsets in `vfxb.rs` can be checked over the whole dump.
 pub fn vfxb_check(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
@@ -3338,6 +3747,83 @@ pub fn vfxb_check(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Resul
                 }
             }
             add("blend", e.blend.to_string());
+            let c = &e.combiner;
+            add("combiner colour process", c.color_process.to_string());
+            add("combiner alpha process", c.alpha_process.to_string());
+            add(
+                "combiner colour blends (tex1 tex2 prim)",
+                format!("{:?}", c.color_blend),
+            );
+            add(
+                "combiner alpha blends (tex1 tex2 prim)",
+                format!("{:?}", c.alpha_blend),
+            );
+            for i in 0..4 {
+                add(
+                    [
+                        "colour input tex0",
+                        "colour input tex1",
+                        "colour input tex2",
+                        "colour input prim",
+                    ][i],
+                    c.color_input[i].to_string(),
+                );
+                add(
+                    [
+                        "alpha input tex0",
+                        "alpha input tex1",
+                        "alpha input tex2",
+                        "alpha input prim",
+                    ][i],
+                    c.alpha_input[i].to_string(),
+                );
+            }
+            add("shader type", c.shader_type.to_string());
+            let x = &e.extras;
+            for a in &x.anims {
+                add("emitter animations", format!("{:?}", a.target));
+                add(
+                    "emitter animation keys",
+                    format!(
+                        "{} keys, frames sorted {}",
+                        a.keys.0.len(),
+                        a.keys.0.windows(2).all(|w| w[0].time <= w[1].time)
+                    ),
+                );
+            }
+            let fl = &x.fields;
+            for (name, on) in [
+                ("spin", fl.spin.is_some()),
+                ("jitter", fl.jitter.is_some()),
+                ("noise", fl.noise.is_some()),
+                ("converge", fl.converge.is_some()),
+                ("magnet", fl.magnet.is_some()),
+                ("position add", fl.pos_add.is_some()),
+                ("floor", fl.floor.is_some()),
+            ] {
+                if on {
+                    add("fields", name.to_string());
+                }
+            }
+            if let Some((_, axis, _)) = fl.spin {
+                add("spin axis", axis.to_string());
+            }
+            if let Some(st) = x.stripe {
+                add(
+                    "stripe length",
+                    match st.length {
+                        0..=16 => "<=16",
+                        17..=64 => "17-64",
+                        _ => ">64",
+                    }
+                    .into(),
+                );
+            }
+            for m in &x.skipped {
+                add("blocks not used", m.clone());
+            }
+            add("colour1 type", format!("{:?}", e.color1_type));
+            add("alpha1 type", format!("{:?}", e.alpha1_type));
             add("particle type", e.particle_type.to_string());
             add("volume", e.volume.to_string());
             add("colour0 type", format!("{:?}", e.color0_type));

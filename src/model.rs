@@ -401,7 +401,7 @@ fn read_vec(
     Ok(out)
 }
 
-fn f16_to_f32(h: u16) -> f32 {
+pub fn f16_to_f32(h: u16) -> f32 {
     let sign = ((h >> 15) as u32) << 31;
     let exp = ((h >> 10) & 0x1f) as u32;
     let man = (h & 0x3ff) as u32;

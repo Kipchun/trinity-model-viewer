@@ -113,6 +113,8 @@ Command-line options:
 | `--map Kitakami` | start in the World tab on a map: `Paldea`, `Kitakami`, `Terarium`, or a room scene's path |
 | `--sound [group]` | start in the Sound tab, optionally on a group (e.g. `music`, `cries`) |
 | `--effects [name]` | start in the Effects tab, optionally playing the first particle effect whose name contains this text (e.g. `ee003_star`) |
+| `--emitters a,b` | with `--effects`: switch on only the emitters with these names |
+| `--frame n` | with `--effects`: jump to frame n (60 per second) and pause |
 | `--textures [folder]` | start in the Textures tab, optionally on the first folder whose path contains this text (e.g. `icon_item`) |
 | `--anim walk01` | start the first animation whose name contains this text |
 | `--look head` | put the camera close in front of this bone (first bone whose name contains the text) |

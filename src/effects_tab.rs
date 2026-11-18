@@ -177,6 +177,7 @@ impl EffectsTab {
                             2 => " (subtract)",
                             3 => " (screen)",
                             4 => " (multiply)",
+                            5 => " (screen distortion, not drawn)",
                             _ => "",
                         };
                         let timing = if n.em.one_time {
@@ -184,7 +185,16 @@ impl EffectsTab {
                         } else {
                             "without end".to_string()
                         };
-                        ui.checkbox(&mut n.enabled, format!("{}{blend}", n.em.name))
+                        let mesh = if n.em.has_primitive() {
+                            " · mesh"
+                        } else if n.em.extras.stripe.is_some() {
+                            " · stripe"
+                        } else if n.spawner {
+                            " · spawner"
+                        } else {
+                            ""
+                        };
+                        ui.checkbox(&mut n.enabled, format!("{}{blend}{mesh}", n.em.name))
                             .on_hover_text(format!(
                                 "life {} frames, {} per emission every {} frames, {timing}
                                  keys: colour {}, alpha {}, scale {}",
@@ -406,9 +416,10 @@ impl EffectsTab {
             ));
             ui.separator();
             ui.small(
-                "Played from the emitters' settings: timing, volume, speed, gravity, life, scale, colour, \
-                 rotation, the first texture and its sprite sheet. The game's colour combiners, second and third \
-                 textures, mesh particles and fields are not read yet, so effects look close, not exact.",
+                "Played from the emitters' settings: timing, volume, speed, gravity, life, scale, both colours, \
+                 rotation, the three textures mixed as the emitter's combiner says, sprite sheets, and the mesh \
+                 of mesh particles. Screen distortion is not drawn; fields and some combiner modes are guesses, \
+                 so effects look close, not exact.",
             );
             return;
         }

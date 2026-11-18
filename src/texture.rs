@@ -111,6 +111,34 @@ pub fn texture_names(b: &[u8]) -> Result<Vec<String>> {
 }
 
 /// Decodes array layer `layer` of texture `index` of a BNTX, first mip level.
+/// The channel selectors of texture `index` (BRTI 0x58, u8 x4: the source of R, G, B, A when the game samples
+/// it; 0 zero, 1 one, 2 R, 3 G, 4 B, 5 A). Over the effect textures: BC4 / R8 `02020202` (alpha = red), BC5
+/// `03030302` or `03020202` (alpha = green), colour formats `05040302` (as stored).
+pub fn channel_select(b: &[u8], index: usize) -> Result<[u8; 4]> {
+    let ptrs = u64_at(b, 0x28)? as usize;
+    let brti = u64_at(b, ptrs + 8 * index)? as usize;
+    let v = u32_at(b, brti + 0x58)?;
+    Ok(v.to_le_bytes())
+}
+
+/// Applies channel selectors (see `channel_select`) to decoded pixels; unknown selectors leave the channel.
+pub fn apply_channels(rgba: &mut [[u8; 4]], sel: [u8; 4]) {
+    if sel == [2, 3, 4, 5] {
+        return;
+    }
+    for p in rgba {
+        let src = *p;
+        for (c, &s) in sel.iter().enumerate() {
+            p[c] = match s {
+                0 => 0,
+                1 => 255,
+                2..=5 => src[s as usize - 2],
+                _ => src[c],
+            };
+        }
+    }
+}
+
 pub fn decode_bntx_texture(b: &[u8], index: usize, layer: u32) -> Result<Image> {
     if !b.starts_with(b"BNTX") {
         bail!("not a BNTX file");
@@ -145,6 +173,7 @@ pub fn decode_bntx_texture(b: &[u8], index: usize, layer: u32) -> Result<Image> 
     let ty = format >> 8;
     let (codec, bw, bh, bpp, name) = match ty {
         0x02 => (Codec::Raw, 1, 1, 1, "R8"),
+        0x07 => (Codec::Raw, 1, 1, 2, "R5G6B5"),
         0x09 => (Codec::Raw, 1, 1, 2, "R8G8"),
         0x0b => (Codec::Raw, 1, 1, 4, "R8G8B8A8"),
         0x0c => (Codec::Raw, 1, 1, 4, "B8G8R8A8"),
@@ -196,6 +225,14 @@ pub fn decode_bntx_texture(b: &[u8], index: usize, layer: u32) -> Result<Image> 
             .chunks_exact(bpp)
             .map(|c| match (ty, bpp) {
                 (0x02, _) => [c[0], c[0], c[0], 255],
+                (0x07, _) => {
+                    // red in the low bits, as R comes first in the other formats (not checked in the game)
+                    let v = u16::from_le_bytes([c[0], c[1]]);
+                    let x = |v: u16, bits: u32| {
+                        ((v as u32 * 255 + ((1 << bits) - 1) / 2) / ((1 << bits) - 1)) as u8
+                    };
+                    [x(v & 0x1F, 5), x((v >> 5) & 0x3F, 6), x(v >> 11, 5), 255]
+                }
                 (0x09, _) => [c[0], c[1], 0, 255],
                 (0x0c, _) => [c[2], c[1], c[0], c[3]],
                 // floats: clamped to 0..1 for display (light probes go past 1)

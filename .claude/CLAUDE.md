@@ -47,7 +47,9 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 | `src/effects.rs` | effect catalogue: `.ptcl` (Nintendo VFXB particles) and `.traef` (animation effect lists) from pack names, by group |
 | `src/effects_tab.rs` | Effects tab: sortable, filterable table of the effect catalogue; opens an effect in the 3D view with playback controls |
 | `src/vfxb.rs` | `.ptcl` (Nintendo VFXB 0x16): section tree, emitter sets, emitters (0xAC0-byte block, offsets in the doc comment), texture table |
-| `src/particles.rs` | effect playback: CPU particle simulation, quads per emitter, `ParticleMaterial` (shader `src/shaders/particle.frag`) |
+| `src/particles.rs` | effect playback: CPU particle simulation, per emitter quads or its primitive mesh, back to front |
+| `src/particle_gpu.rs` | effect drawing: `ParticleMaterial` (the emitter's combiner, shader `src/shaders/particle.frag`) and a geometry with three UV sets and both colours (quads, or instanced primitive meshes) |
+| `src/bfres.rs` | Switch BFRES 0.9, as far as the effects' primitive meshes (`G3PR`) need it |
 | `src/skeleton.rs` | `.trskl`, rest pose vs. bind pose |
 | `src/anim.rs` | `.tranm` tracks, `_base.tracr` animation lists |
 | `src/demo.rs` | play mode (F7): locomotion blend space and jump states |

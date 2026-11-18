@@ -71,8 +71,8 @@ clothing/body textures), `charamotion_*` (274, `.trmdt`, `.tracn`, `.tracr`), `c
 
 ## Phase 5: polish
 
-- Effects: listed and played in the Effects tab (2026-11-16, `vfxb.rs`, `particles.rs`). Next: mesh particles
-  (`G3PR`), the colour combiners (colour 1, textures 1-2), then `.traef` events on Pokémon / character
+- Effects: listed and played in the Effects tab (2026-11-16, `vfxb.rs`, `particles.rs`). Mesh particles
+  (`G3PR`, `bfres.rs`) the colour combiners, emitter animations, fields and stripes done 2026-11-18. Next: curl noise, then `.traef` events on Pokémon / character
   animations.
 - Emission/roughness, transparency sorting, material and face animations.
 - Export (glTF) of whatever is loaded, for the user's own use. Keep exports out of the repo. Planned in detail in

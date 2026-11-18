@@ -317,6 +317,77 @@ Update this file at the end of each work session: move items between sections, a
   follow types, emission over distance, `FCOL` / `FRND` / `CADP` blocks (fields: colour, random, ...);
   (4) `.traef` events to play effects on Pokémon / character animations; (5) a floor or a model to show scale.
 
+### Effects: mesh particles (2026-11-18, not committed yet)
+- **Primitives found**: emitter +0x8C8 is a u64 primitive id. `G3PR`'s data is a Switch **BFRES 0.9** (its size from
+  the BFRES header; the section size is smaller); child `G3NT` lists the primitives in the BFRES's model order
+  (same entry layout as `GTNT`; 8 bytes = attribute index for position, normal, tangent, colour, UV 0, UV 1).
+  `PRMA` is empty in all but 14 files.
+- `src/bfres.rs`: minimal reader (models, shapes' LOD 0, vertex attributes `_p0 _n0 _c0 _u0`, u8/u16/u32 indices);
+  formats seen: 0x1805 / 0x1505 positions, 0x0E02 normals, 0x0B01 / 0x1505 colours, 0x0901 / 0x0902 / 0x1201 /
+  0x1202 / 0x1205 UVs. `probe --vfxb-prims`: **428 files, 622 meshes, 0 failures; 1034 of 2594 emitters use one,
+  all ids found; every G3NT map matches the attribute names.** Only 149 meshes are flat: rings, cylinders, beams.
+  `probe --vfxb-tree [path]` dumps the section tree.
+- `particles.rs`: an emitter with a primitive draws it once per particle (three-d `InstancedMesh`: matrix, colour,
+  UV transform per particle; colours pre-encoded for three-d's sRGB-to-linear step; glows past 1 go through the
+  material's colour scale). Mesh vertex colours used.
+- **Rotation on three axes** (0x700 / 0x710 / 0x720 / 0x730 are x, y, z) and **spin decay** at 0x72C (per frame:
+  903 at 1.0, 0.8-0.99 elsewhere, 0 taken as none). Billboard quads still spin on the screen only.
+- Particle type for meshes (from which flat axis goes with which type): billboards map the mesh's XY to the screen,
+  3 keeps the emitter frame, 4 lays XY on XZ, 5/6 point Y along the velocity. Mirror-wrap UV doubling applied to
+  meshes as to quads (not checked).
+- Effects tab: mesh emitters marked "· mesh". Seen in the window: `ee003_star` (tumbling 3D stars, were squares),
+  `ee008_end_impact` (light rings as tilted ring meshes).
+- Next for effects: combiners (colour 1 / alpha 1, textures 1-2), `CADP`/`FCOL`/`FRND` blocks, `.traef` events.
+
+### Effects: colour combiners (2026-11-18, not committed yet)
+- **Combiner found** at emitter +0x8F8: 20 bytes, field order from EffectLibrary's `EmitterCombiner` (versions
+  < 36; the library names the fields, not the values): colour / alpha process, texture 1 / 2 / primitive colour
+  and alpha blends, texture 0-2 / primitive colour and alpha inputs, shader type, apply alpha. Also read: colour 1
+  / alpha 1 (types 0x99D / 0x99F, values 0x9B0 / 0x9BC, keys 0x4C0 / 0x540), emitter colour 1 (0x7BC).
+- **Value meanings worked out from the dump** (`probe --vfxb` counts them; `--vfxb-dump <out>` writes every
+  emitter block plus each sampler's BNTX format and channel selectors to study outside the repo):
+  colour process 0 colour 0, 1 tex x c0, 2 c1 where the texture is dark to c0 where bright (`glow`: white core,
+  orange edge), 3 tex x c0 + c1; alpha process 0 tex x a0, 1 dissolve, 2 x a1, 3 dissolve x a1, 4 distance field
+  (last three formulas guessed); blends 0 multiply, 1 add, 2 subtract; inputs 0 as sampled, 1 red (`glow_back`:
+  1 = 1 - alpha drew a dark square), 2 one (opaque BC1 51 of 60), colour 3 alpha.
+- **BNTX channel selectors** (BRTI +0x58): BC4 / R8 `R,R,R,R`, BC5 `R,G,G,G` or `R,R,R,G`, colour formats as
+  stored. `texture::channel_select` / `apply_channels`; the particle textures use them (Textures tab unchanged).
+- **Blend type 5 = screen distortion** (19 emitters, the `dist` ones): switched off, labelled. Shader type 1 / 2
+  with a two-channel texture 0: texture 0 pushes the UVs of textures 1-2 (strength not found, fixed 0.08).
+- **Spawners**: 53 emitters with no texture and no mesh (48 with children: `gp1`, `EmitOya`, `*_parent`) are
+  simulated, not drawn (they were red / white squares).
+- `src/particle_gpu.rs`: own three-d `Geometry` (quads, or the primitive mesh instanced) with three UV sets and
+  both colours; `ParticleMaterial` with the combiner uniforms; `shaders/particle.frag` rewritten. Particles of an
+  emitter are sorted back to front. V is flipped in the vertex shaders (three-d flips texture rows).
+- `texture.rs`: R5G6B5 (0x0701, 32 effect textures; red taken as the low bits, not checked). Viewer:
+  `--emitters a,b` (with `--effects`: only these emitters on).
+- Seen in the window: `ee003_star` (round orange glow, stars with their second/third textures, violet colour-1
+  sparkles), `ee008_end_impact` (rings now thin and sharp: colour 1 keyed to about -9), the raid shield dome
+  (`ej_raid_powercharge_success_shield`: layered blue crystal, no more red spawner squares).
+- Not checked against the game: the direction of colour process 2, dissolve / distance-field formulas, alpha
+  input 3 and colour input 4 (rare), UV distortion strength. Comparing with a capture of the game would settle it.
+- Next for effects: `CADP`/`FCOL`/`FRND`/`FSPN` blocks (fields: colour, random, spin), emitter follow types and
+  emission by distance, `.traef` events on Pokémon / character animations.
+
+### Effects: emitter animations, fields, stripes (2026-11-18, not committed yet)
+- An emitter's attribute chain (EMTR section +0x10) is read (`vfxb::Extras`). `probe --vfxb-blocks <magic> [n]`
+  prints every block of a type as words with its emitter; `probe --vfxb` counts what is read.
+- **Emitter animations** (`EA**`, 427; layout from EffectLibrary: u8 enable, loop, random start; u32 key count;
+  u32 loop count; keys {x, y, z, frame of the emitter's life}). Targets by name and values: EATR translation,
+  EASL scale, EAER rate, EAC0/EAC1 colours, EAA0 alpha, EAOV/EADV speeds, EAGV gravity, EAPL life, EASS particle
+  scale, EAES volume scale; all keys in order. Not used: EAET (14; values look like positions).
+- **Fields** (layouts from the dump, formulas guessed): FSPN spin (142; radians per frame, axis 0/1/2, outward
+  speed), FRN1 jitter (11; amplitude, every n frames), FRND smooth random offset (240; amplitude + 4 noise
+  frequencies/weights), FCOV pull to the emitter (60; rate or keys over life), FMAG magnet (9), FPAD position add
+  (1), FCOL floor (5). Not read: FCLN curl noise (114), FCSF (8).
+- **Stripes**: EP02 (97, history length +0x14) / EP03 (14, +0x18) draw the particle as a camera-facing ribbon
+  through its last positions, texture U along it. EP04 (19, raid background dust; looks like an area loop) not used.
+- Viewer: emitter list marks "· stripe"; `--frame n` (with `--effects`) jumps to a frame and pauses.
+- Seen in the window: `eb004_ballout` trail at frame 12: teal ribbons spiralling out (stripe + spin + outward).
+  `merge_trail` stripes curve; `ej_raid_powercharge_start` uses EATR/EAC0 (not looked at closely).
+- Next for effects: FCLN curl noise, EP04, emitter follow (child emitters inherit parent motion), `.traef` events
+  on Pokémon / character animations.
+
 ## In flight
 
 - Commit the play-mode work (waiting on the user).
