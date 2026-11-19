@@ -22,7 +22,11 @@ example path shown; the others are inferred and need a check.
 | `charamotion_cc_base` | `chara/motion_cc_base/cc0004_adl_m/cc0004_adl_m.tracr` | 25 shared body types (`cc0001_kid` .. `cc2011_cla_f`): clip list `<type>.tracr`, clips `<type>_<NNNNN>_<name>.tranm`; per-trainer folders (`tr0420_mountain/tr0420_00.tracr`) with full lists or per-clip files of special actions | confirmed |
 | `charamotion_uq` | `chara/motion_uq/tr0080_principal/tr0080_00.tracr` | named characters' own clip lists (`tr0080_00_<NNNNN>_<name>.tranm`) | confirmed |
 | `charamotion_tr`, `_vr` | `chara/motion_tr/tr0360_tanpan/tr0360_00_head00.tracr` | face clips (`.tracr`/`.tracp`/`.tracl`/`.tracn` of the head), spring bones (`.trspb`) | confirmed |
-| `charademo_` | `chara/demo_cc_base/...`? | cutscene clips (`.tracp`) | inferred |
+| `charademo_` | `chara/demo_cc_base/tr0630_d060_1_a/d060_cc_1_a.tracp` | trainers' cutscene clips (`.tracp`), per trainer and cutscene | confirmed |
+| `demoevd` | `demo/ev/d010/d010.trtml`, `demo/ev/d060/d060_cam_c14.trcma`, `demo/ev/d010/pm0025/d010_pm0025_anim_c014.tracm` | story event cutscenes `dNNN` (29): timeline, cameras, animations | confirmed |
+| `demoeeee` | `demo/ee/ee101/ee101.trtml`, `demo/ee/ee_bk_botan_01_01/...`, `demo/ee/ee_wait01/...`, `demo/ee/hokaku/ee101_cam_c01.trcma` | battle cutscenes (217 packs): `eeNNN` battle scenes, `ee_bk_*` trainers' lines, `ee_wait*` idle cameras | confirmed |
+| `demoejej`, `demosdsd`, `demoshare`, `demotest` | `demo/ej/ej_raid_cheer01/...`, `demo/sd/sd9010_title/sd9010_title.trtml`, `demo/share/camera/bk/...`, `demo/test/lastbatle_work/...` | Terastal / raid, system scenes, shared cameras and models, tests | confirmed |
+| (no pack name) | `world/scene/parts/demo/ev/d010/d010_tr0040_/d010_tr0040_0.trscn` | cutscene sub-scenes, named by the timeline's `Scene/LoadSubScene` clips (path given without the `_0`) | confirmed |
 | `field_graphicterrain_model` | `field_graphic/terrain_model/plants_me_tree_pine03/plants_me_tree_pine03.trmdl` | objects, plants, ground | confirmed |
 | `field_graphicterrainterrain_` | `field_graphic/terrain/terrain_00_00/ter_00_00.trtrr` | overworld terrain tiles | confirmed |
 | `field_graphiccommon_model` | `field_graphic/common_model/a_t01_i01/a_t01_i01.trmdl` | interiors and furniture | confirmed |

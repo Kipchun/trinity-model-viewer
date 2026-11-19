@@ -388,6 +388,53 @@ Update this file at the end of each work session: move items between sections, a
 - Next for effects: FCLN curl noise, EP04, emitter follow (child emitters inherit parent motion), `.traef` events
   on Pokémon / character animations.
 
+### Cutscenes tab: list and timelines (2026-11-18, not committed yet)
+- How cutscenes work: a `.trtml` **timeline** is the script (`demo/<kind>/<name>/<name>.trtml`). It holds no
+  animation itself: tracks per object of the cutscene's scenes, each with clips of commands on a 60 fps frame line
+  (`Scene/LoadSubScene` the rooms and characters, `CameraAnimation/Load` + `/Play` `.trcma` cameras,
+  `Animation/*` on models (`.tracp`/`.tracm` clips next to the timeline, trainers' in `chara/demo_cc_base/`),
+  `GameObject/Set*` transforms, `Model/SetVisibility`, `Light/*`, `Particle/Emit`, `Audio/PostEventGlobal` Wwise
+  events, `Title/Message/ShowMessageWindow` with a message file + label, fades, post effects). Battle timelines
+  repeat tracks per condition (`PlayerRide`, `BallFall`, `SelfOther`, ...); story events have a track per game
+  version for text (`PackageType` A / B).
+- `timeline.rs` (format in its doc comment), `cutscenes.rs` (catalogue: each `demo/` pack name rebuilt, each
+  folder above it tried as `<folder>/<folder>.trtml`), `cutscenes_tab.rs`, `probe --timelines [name]`.
+- Found 285 timelines: story events 29 (`d010`..`d810`), battle 69, trainers in battle 97, battle idle cameras 51,
+  Terastal and raids 20, system 15, test 4. All parse; no clip ends after the length (root slot 1). Brute force
+  over `demo/ev/dNNN`, `demo/ee/eeNNN`, `demo/ej/ejNNN` (0-999) found none the pack names miss.
+- Frame rate checked: d010's cameras (60 fps `.trcma`) follow each other with no gap at 60 timeline frames/s.
+- Seen in the window: d010 (academy introduction, 1:37, 106 tracks, 999 clips) with its English lines; ee101
+  (capture, 44 tracks with `BallFall` / `PlayerRide` variants).
+- Next for cutscenes: play one. Load the sub-scenes (`world/scene/parts/demo/...`, `scene.rs` already reads
+  them), find objects by the track names (`d010.tr0690_G_Mod` = scene `d010`, object `tr0690_G_Mod`), read
+  `.trcma` cameras and `.tracp`/`.tracm` clips (unknown formats), then run the clips: visibility, transforms,
+  camera, animation, text. Battle timelines also need the battle's actors. `effect/battle_*` move timelines use
+  the same format.
+
+### Cutscenes: playing, step C2 cast (2026-11-18, not committed yet)
+- `cast.rs`: actors from every scene (model component: `CharacterCreationMasterComponent` -> `.ccdatam` ->
+  `.ccdata`, `CharacterCreationComponent` -> `.ccdata`, `ti_PokemonModelComponent` -> species from the name);
+  clips through the timeline's container link; cut clips by shot name; variants' `vis_*` groups hidden.
+- `skin.rs`: `Loaded`, `build`, `apply_skin`, `Clip` moved out of `main.rs` (no behaviour change; `--check` as
+  before: 579 streamed scenes, 156 room scenes, 0 failures).
+- `probe --cast [name]` (220 actors, 2 fail: the player), `probe --ccdata <path>` (parts, variants, mesh groups).
+- Facts: `int_cutnum` values are not dense per actor (tr0680_M has one clip, asked for cut 4), so the clip is the
+  one named after the shot; k-th and by-shot differ for 29 cuts. A variant's tags are `{0: tag}` tables. The
+  white domes on students were the hat and the head's hat-hair cap, which variants hide.
+
+### Cutscenes: playing, step C1 scenes and camera (2026-11-18, not committed yet)
+- Plan: [CUTSCENE_PLAN.md](CUTSCENE_PLAN.md). **Play** in the Cutscenes tab (or `--play d010 [--frame n]`).
+- `camera_anim.rs`: `.trcma` read (lens + transform channels, `anim.rs` union tracks made `pub(crate)`);
+  `probe --cameras`: all 495 cameras the timelines play parse, all 60 fps.
+- `cutscene_play.rs`: root scene `world/scene/parts/demo/<kind>/<name>_/<name>_0.trscn`, its sub-scenes, the
+  timeline's `LoadSubScene`s and scenes it only ends or addresses, each a `plants` group shown while loaded;
+  the camera from the shot playing; the current line as a subtitle (`msg.rs`).
+- Timeline values: tag 5 is a vec3 (inline struct), not a float; fixed in `timeline.rs`.
+- Found on the way: characters are `.ccdata` (base + parts), their clips `.tracn` -> `.tracr` -> `.tranm`, one
+  clip per cut picked by `int_cutnum`; see the plan for C2.
+- All 29 story events have a root scene and camera shots. d200 (and probably others) play in the overworld and
+  show nothing yet (C1b).
+
 ## In flight
 
 - Commit the play-mode work (waiting on the user).
@@ -403,6 +450,15 @@ See [ROADMAP.md](ROADMAP.md). Immediate next steps:
    - Grass: height file slot 13 masks + `.trtrr` slot 6 parameters, scattered per cell, instanced, short range.
    - Towns (done 2026-11-16, step 4): next, the two-layer "BGLayer" material (vertex-colour mix), distant
      `clod` scenes, and the DLC maps (`ter_1x`/`ter_2x`, `su1`/`su2`) as their own worlds.
+   - Loading speed (measured 2026-11-18, release, CPU side only, all 100 Paldea tiles without towns: 17.2 s on the
+     main thread). Model bake 12.4 s (layered models 6.5 s for 195, about 33 ms each in `apply_layers`' powf;
+     plain 5.9 s for 733), all LODs' mesh loads 1.6 s, heights 0.9 s (1026 files decompressed to find 100 height
+     files), shared layers 0.37 s, scenes 0.2 s. Decoding each unique texture once costs only about 2 s: 2160 decodes
+     repeat across models (no shared cache). Fix order: texture cache shared across models; no normal maps
+     for placed models (they draw albedo only); sRGB LUTs in `apply_layers`; pick the height file by size before
+     decompressing; worker threads with their own `Archive` (as `gallery.rs`); nearest tiles first. GPU side not
+     measured: every group uploads its models' vertex buffers again (`InstancedMesh` per group), water and
+     resident load the same models twice, the pack cache clears all 64 entries at once.
    - Area Zero's crater models; check the layer normal map's green sign against the game; white trunk bases on
      palms (a material without colour texture?); `.trtbf` detail maps (0/255 masks, meaning unknown).
 3. Phase 1 of the roadmap, continued:

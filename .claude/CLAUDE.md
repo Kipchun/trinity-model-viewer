@@ -31,7 +31,8 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 
 | File | Role |
 | --- | --- |
-| `src/main.rs` | app, UI (egui panels), scene building, skinning, clips and crossfades |
+| `src/main.rs` | app, UI (egui panels), the model view, clips and crossfades |
+| `src/skin.rs` | skinned models on the GPU: parts as meshes with materials (`build`), CPU skinning (`apply_skin`), a clip's pose (`Clip`) |
 | `src/archive.rs` | `data.trpfd`/`data.trpfs` reader, FNV-1a 64 path hashes, Oodle Kraken; `pokemon_models()` discovery |
 | `src/fb.rs` | schemaless, bounds-checked FlatBuffers reader (fields by slot index) |
 | `src/model.rs` | `.trmdl` / `.trmsh` / `.trmbf` (+ `.trmtr` slots) |
@@ -45,6 +46,12 @@ type with the probe), `find-assets` (list and search the archive's pack names).
 | `src/audio.rs` | Sound tab: worker (catalogue, decode, waveform), rodio player with loop points, WAV export, user names |
 | `src/gallery.rs` | Textures tab: worker thread with its own `Archive`, thumbnail grid, single view (zoom, channels, layers) |
 | `src/effects.rs` | effect catalogue: `.ptcl` (Nintendo VFXB particles) and `.traef` (animation effect lists) from pack names, by group |
+| `src/timeline.rs` | `.trtml` cutscene timelines: tracks, conditions, clips (command, frames, typed parameters) |
+| `src/cutscenes.rs` | cutscene catalogue: every `demo/` timeline found from pack names, by group (story, battle, Terastal, system, ...) |
+| `src/cutscenes_tab.rs` | Cutscenes tab: sortable table; a cutscene's timeline drawn as tracks and clips; its dialogue, sub-scenes, files, sounds |
+| `src/camera_anim.rs` | `.trcma` camera animations: lens and transform channels, sampled per frame |
+| `src/cutscene_play.rs` | playing a cutscene: its scenes as placed-model groups shown while loaded, the camera from the shot playing, the current message |
+| `src/cast.rs` | a cutscene's cast: actors from scenes (`.ccdata` characters and props, Pokémon), variants' hidden meshes, clips per cut, posing |
 | `src/effects_tab.rs` | Effects tab: sortable, filterable table of the effect catalogue; opens an effect in the 3D view with playback controls |
 | `src/vfxb.rs` | `.ptcl` (Nintendo VFXB 0x16): section tree, emitter sets, emitters (0xAC0-byte block, offsets in the doc comment), texture table |
 | `src/particles.rs` | effect playback: CPU particle simulation, per emitter quads or its primitive mesh, back to front |

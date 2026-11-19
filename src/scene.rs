@@ -73,7 +73,6 @@ impl Node {
     }
 
     /// Visits this node and all below it, with the chain of parents.
-    #[allow(dead_code)] // used by the probe
     pub fn walk<'a>(
         &'a self,
         parents: &mut Vec<&'a Node>,

@@ -97,6 +97,18 @@ The viewer reads it in place and never changes it.
   Pause, Restart, Loop and speed on the left, and a checkbox per emitter to see what each part does; **Back to
   list** returns to the table. Effects look close to the game, not exact: parts drawn with meshes show as flat
   squares, and the game's colour mixing is approximated.
+- **Cutscenes** (the last tab): the game's 285 cutscene timelines: the story's event scenes, battle scenes (ball
+  throws, captures), trainers' lines in battle, battle idle cameras, Terastal and Tera Raid scenes, and system
+  scenes (title, trades, Mystery Gift, sandwiches). Sort by name, group, length, tracks or clips; filter by group or
+  **find**. Pick one to see its message lines (in the language picked on the left), sub-scenes, files and sound
+  events. Double-click (or **Open timeline**) to see the timeline: one row per object, each command as a bar on
+  the frame line, coloured by kind; hover a bar for its parameters, click it to keep them on the right.
+  **Play** shows a story cutscene in the 3D view with its rooms and buildings and its cast (characters, Pokémon
+  and props, each in its own animation for every shot), seen through the cutscene's own camera, with its lines
+  as subtitles: Play / Pause, Restart, Loop, a frame slider and speed on the left; untick **Cutscene camera** to
+  look around freely. The **Cast** list shows who is in it and which shot's animation each one plays. Not shown
+  yet: the player character, faces' own animations, things held in hands, lights, effects and sound; cutscenes
+  that take place out in the open world show only their cast and subtitles for now.
 - **Right panel**: the model's files, parts and materials, and its skeleton as a tree; click a bone to highlight it
   and see its transform.
 - **Mouse**: left drag orbits, right drag pans, the wheel zooms.
@@ -114,7 +126,9 @@ Command-line options:
 | `--sound [group]` | start in the Sound tab, optionally on a group (e.g. `music`, `cries`) |
 | `--effects [name]` | start in the Effects tab, optionally playing the first particle effect whose name contains this text (e.g. `ee003_star`) |
 | `--emitters a,b` | with `--effects`: switch on only the emitters with these names |
-| `--frame n` | with `--effects`: jump to frame n (60 per second) and pause |
+| `--play name` | start in the Cutscenes tab playing the first cutscene whose name contains this text (e.g. `d010`) |
+| `--frame n` | with `--effects` or `--play`: jump to frame n (60 per second) and pause |
+| `--cutscenes [name]` | start in the Cutscenes tab, optionally on the timeline of the first cutscene whose name contains this text (e.g. `d010`) |
 | `--textures [folder]` | start in the Textures tab, optionally on the first folder whose path contains this text (e.g. `icon_item`) |
 | `--anim walk01` | start the first animation whose name contains this text |
 | `--look head` | put the camera close in front of this bone (first bone whose name contains the text) |

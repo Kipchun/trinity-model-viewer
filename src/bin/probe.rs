@@ -52,6 +52,12 @@
 //!                                                     decode every Nth sound (default all), count failures
 //!   cargo run --release --bin probe -- --grep <text> [pack filter]  files containing <text> (ASCII or UTF-16), in
 //!                                                     the packs whose name contains [pack filter] (default all)
+//!   cargo run --release --bin probe -- --timelines [name]       every cutscene timeline parsed: commands, value types,
+//!                                                     lengths; or one timeline's tracks and clips
+//!   cargo run --release --bin probe -- --trcma <path>          a camera animation's channels (tags, first values)
+//!   cargo run --release --bin probe -- --cast [name]           story cutscenes' cast read as the player does, clips parsed
+//!   cargo run --release --bin probe -- --cameras               every cutscene camera parsed (camera_anim.rs)
+//!   cargo run --release --bin probe -- --timeline-values <name> <param>  raw layout of a timeline parameter's value
 //!   cargo run --release --bin probe -- --trainer-anims         every human model: own clip list, named and best-fit body type
 #[path = "../anim.rs"]
 mod anim;
@@ -59,10 +65,20 @@ mod anim;
 mod archive;
 #[path = "../bfres.rs"]
 mod bfres;
+#[path = "../camera_anim.rs"]
+mod camera_anim;
+#[path = "../cast.rs"]
+mod cast;
 #[path = "../config.rs"]
 mod config;
+#[path = "../cutscene_play.rs"]
+mod cutscene_play;
+#[path = "../cutscenes.rs"]
+mod cutscenes;
 #[path = "../effects.rs"]
 mod effects;
+#[path = "../eye.rs"]
+mod eye;
 #[path = "../fb.rs"]
 mod fb;
 #[path = "../instances.rs"]
@@ -77,12 +93,16 @@ mod model;
 mod motion;
 #[path = "../msg.rs"]
 mod msg;
+#[path = "../plants.rs"]
+mod plants;
 #[path = "../player.rs"]
 mod player;
 #[path = "../scene.rs"]
 mod scene;
 #[path = "../skeleton.rs"]
 mod skeleton;
+#[path = "../skin.rs"]
+mod skin;
 #[path = "../sound_names.rs"]
 mod sound_names;
 #[path = "../terrain.rs"]
@@ -91,6 +111,8 @@ mod terrain;
 mod texture;
 #[path = "../textures.rs"]
 mod textures;
+#[path = "../timeline.rs"]
+mod timeline;
 #[path = "../vfxb.rs"]
 mod vfxb;
 #[path = "../wem.rs"]
@@ -700,6 +722,24 @@ fn main() -> anyhow::Result<()> {
     }
     if args[0] == "--vfxb" {
         return vfxb_check(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--timeline-values" && args.len() >= 3 {
+        return timeline_values(&mut ar, &args[1], &args[2]);
+    }
+    if args[0] == "--ccdata" {
+        return ccdata_dump(&mut ar, &args[1]);
+    }
+    if args[0] == "--cast" {
+        return cast_check(&mut ar, args.get(1).map(String::as_str));
+    }
+    if args[0] == "--cameras" {
+        return cameras(&mut ar);
+    }
+    if args[0] == "--trcma" {
+        return trcma_dump(&mut ar, &args[1]);
+    }
+    if args[0] == "--timelines" {
+        return timelines(&mut ar, args.get(1).map(String::as_str));
     }
     if args[0] == "--effects" {
         return effect_catalogue(&ar);
@@ -3910,5 +3950,425 @@ pub fn vfxb_check(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Resul
     println!(
         "{files} files, {failed} failed, {emitters} emitters; sampler textures found in the BNTX {tex_ok}, not found {tex_missing}"
     );
+    Ok(())
+}
+
+/// `--timelines [name]`: parse every cutscene timeline of the catalogue and count what is in them; with a name,
+/// print that timeline's tracks and clips.
+fn timelines(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let t0 = std::time::Instant::now();
+    let (list, lost) = cutscenes::catalogue(ar);
+    println!(
+        "{} timelines, {lost} demo pack names not rebuilt ({:.1} s)",
+        list.len(),
+        t0.elapsed().as_secs_f32()
+    );
+    if let Some(q) = one {
+        let c = list
+            .iter()
+            .find(|c| c.name == q)
+            .ok_or_else(|| anyhow::anyhow!("no timeline named {q}"))?;
+        let t = timeline::Timeline::parse(&ar.read(&c.path)?)?;
+        println!(
+            "{}: length {} frames, last clip end {}, slots 3/4 {:?}",
+            c.path,
+            t.length,
+            t.last_clip_end(),
+            t.unknown,
+        );
+        for tr in &t.tracks {
+            println!("track {} {:?}", tr.name, tr.conditions);
+            for g in &tr.groups {
+                println!("  group {:?}", g.name);
+                for cl in &g.clips {
+                    let ps: Vec<String> = cl
+                        .params
+                        .iter()
+                        .map(|p| format!("{}={}", p.name, p.value.text()))
+                        .collect();
+                    println!(
+                        "    {:>5}-{:<5} {} {}",
+                        cl.start,
+                        cl.end,
+                        cl.command,
+                        ps.join(" ")
+                    );
+                }
+            }
+        }
+        return Ok(());
+    }
+    let mut by_group: BTreeMap<String, usize> = BTreeMap::new();
+    let mut commands: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tags: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut failed, mut over, mut no_len) = (0, 0, 0);
+    let mut longest = (0u32, String::new());
+    for c in &list {
+        *by_group.entry(c.group.label().to_string()).or_default() += 1;
+        let t = match ar.read(&c.path).and_then(|b| timeline::Timeline::parse(&b)) {
+            Ok(t) => t,
+            Err(e) => {
+                failed += 1;
+                println!("FAIL {}: {e:#}", c.path);
+                continue;
+            }
+        };
+        if t.length == 0 {
+            no_len += 1;
+        }
+        if t.last_clip_end() > t.length {
+            over += 1;
+            println!(
+                "  {} : last clip end {} > length {}",
+                c.name,
+                t.last_clip_end(),
+                t.length
+            );
+        }
+        if t.frames() > longest.0 {
+            longest = (t.frames(), c.name.clone());
+        }
+        for (_, cl) in t.clips() {
+            *commands.entry(cl.command.clone()).or_default() += 1;
+            for p in &cl.params {
+                let k = match &p.value {
+                    timeline::Value::Int(v) => {
+                        let big = if *v > 0xffff || *v < -0xffff {
+                            "big"
+                        } else {
+                            "small"
+                        };
+                        *tags.entry(format!("int {big}")).or_default() += 1;
+                        *tags.entry(format!("int name {}", p.name)).or_default() += 1;
+                        continue;
+                    }
+                    timeline::Value::Bool(_) => "bool",
+                    timeline::Value::Str(_) => "string",
+                    timeline::Value::Float(f) if f.is_finite() && f.abs() < 1e7 => "float",
+                    timeline::Value::Float(_) => "float, odd value",
+                    timeline::Value::Vec3(v)
+                        if v.iter().all(|f| f.is_finite() && f.abs() < 1e7) =>
+                    {
+                        "vec3"
+                    }
+                    timeline::Value::Vec3(_) => "vec3, odd value",
+                    timeline::Value::Other(t, _) => {
+                        *tags.entry(format!("other {t} ({})", p.name)).or_default() += 1;
+                        continue;
+                    }
+                };
+                *tags.entry(k.to_string()).or_default() += 1;
+            }
+        }
+    }
+    println!(
+        "{failed} failed, {over} with a clip past the length, {no_len} without a length; longest {} ({} frames)",
+        longest.1, longest.0
+    );
+    println!("by group: {by_group:?}");
+    println!("value types: {tags:?}");
+    let mut cv: Vec<_> = commands.into_iter().collect();
+    cv.sort_by_key(|a| std::cmp::Reverse(a.1));
+    println!("{} commands:", cv.len());
+    for (k, n) in cv {
+        println!("  {n:>6} {k}");
+    }
+    Ok(())
+}
+
+/// `--timeline-values <name> <param>`: raw layout of a parameter's value table, for study.
+fn timeline_values(ar: &mut archive::Archive, name: &str, param: &str) -> anyhow::Result<()> {
+    let (list, _) = cutscenes::catalogue(ar);
+    let c = list
+        .iter()
+        .find(|c| c.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no timeline named {name}"))?;
+    let b = ar.read(&c.path)?;
+    let root = fb::Table::root(&b, 0)?;
+    let mut shown = 0;
+    for t in root.tables(0)? {
+        for g in t.tables(2)? {
+            for cl in g.tables(2)? {
+                for p in cl.tables(9)? {
+                    if p.string(0)?.as_deref() != Some(param) || shown >= 4 {
+                        continue;
+                    }
+                    shown += 1;
+                    let tag = p.u8(1, 0);
+                    let Some(v) = p.table(2)? else {
+                        println!("tag {tag}: no value table");
+                        continue;
+                    };
+                    let a = v.field(0).unwrap_or(0);
+                    let words: Vec<String> = (0..6)
+                        .map(|k| {
+                            let w = u32_at(&b, a + 4 * k).unwrap_or(0);
+                            format!("{w:08x} ({:.3})", f32::from_bits(w))
+                        })
+                        .collect();
+                    println!(
+                        "tag {tag}: {} slots, field 0 at +{}: {}",
+                        v.slot_count(),
+                        a.saturating_sub(v.pos),
+                        words.join(" ")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `--trcma <path>`: a camera animation's tracks: per (tag, value) slot pair, the union tag and the first values
+/// read as f32 (fixed: the value's words; dynamic / keyed: count and first elements). For study.
+fn trcma_dump(ar: &mut archive::Archive, path: &str) -> anyhow::Result<()> {
+    let b = ar.read(path)?;
+    let root = fb::Table::root(&b, 0)?;
+    if let Some(info) = root.table(0)? {
+        println!("info: frames {} fps {}", info.u32(1, 0), info.u32(2, 0));
+    }
+    let words = |at: usize, n: usize| -> String {
+        (0..n)
+            .map(|k| format!("{:.4}", f32::from_bits(u32_at(&b, at + 4 * k).unwrap_or(0))))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (ti, t) in root.table(1)?.iter().enumerate() {
+        println!(
+            "track {ti} {:?} ({} slots)",
+            t.string(0)?.unwrap_or_default(),
+            t.slot_count()
+        );
+        for s in 1..t.slot_count() {
+            let Some(sub) = t.table(s).ok().flatten() else {
+                continue;
+            };
+            println!("  slot {s}: {} slots", sub.slot_count());
+            let mut k = 0;
+            while k + 1 < sub.slot_count() {
+                let tag = sub.u8(k, 0);
+                if let Some(v) = sub.table(k + 1).ok().flatten() {
+                    let desc = match tag {
+                        1 => format!("fixed [{}]", words(v.field(0).unwrap_or(0), 4)),
+                        2 => {
+                            let (st, n) = v.vector(0).unwrap_or((0, 0));
+                            format!(
+                                "dynamic n={n} first [{}] last [{}]",
+                                words(st, 6),
+                                words(st + 4 * n.saturating_sub(1), 1)
+                            )
+                        }
+                        3 | 4 => {
+                            let (_, nf) = v.vector(0).unwrap_or((0, 0));
+                            let (st, n) = v.vector(1).unwrap_or((0, 0));
+                            format!("keyed frames={nf} values={n} first [{}]", words(st, 6))
+                        }
+                        t => format!("tag {t}"),
+                    };
+                    println!("    pair {}/{}: tag {tag} {desc}", k, k + 1);
+                } else if tag != 0 {
+                    println!("    pair {}/{}: tag {tag} (no value)", k, k + 1);
+                }
+                k += 2;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `--cameras`: every camera animation the cutscene timelines play (`CameraAnimation/Play` fileName in the
+/// timeline's folder, and `.trcma` paths in parameters), parsed; counts failures, frame rates and channel kinds.
+fn cameras(ar: &mut archive::Archive) -> anyhow::Result<()> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let (list, _) = cutscenes::catalogue(ar);
+    let mut paths = BTreeSet::new();
+    let mut missing = 0;
+    for c in &list {
+        let Ok(t) = ar.read(&c.path).and_then(|b| timeline::Timeline::parse(&b)) else {
+            continue;
+        };
+        for f in t.files() {
+            if f.ends_with(".trcma") {
+                paths.insert(f);
+            }
+        }
+        for (_, cl) in t.clips() {
+            if cl.command == "CameraAnimation/Play"
+                && let Some(n) = cl.param("fileName").and_then(|v| v.as_str())
+                && !n.is_empty()
+            {
+                let p = format!("{}{n}.trcma", c.folder);
+                if ar.contains(&p) {
+                    paths.insert(p);
+                } else {
+                    missing += 1;
+                }
+            }
+        }
+    }
+    let (mut ok, mut failed) = (0, 0);
+    let mut fps: BTreeMap<u32, usize> = BTreeMap::new();
+    for p in &paths {
+        match ar.read(p).and_then(|b| camera_anim::CameraAnim::parse(&b)) {
+            Ok(c) => {
+                ok += 1;
+                *fps.entry(c.fps).or_default() += 1;
+                let s = c.sample(0.0);
+                if !(s.position.x.is_finite() && s.fov > 0.0 && s.fov < 3.2) {
+                    println!("odd: {p} {s:?}");
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                println!("FAIL {p}: {e:#}");
+            }
+        }
+    }
+    println!(
+        "{} cameras: {ok} parse, {failed} fail; fps {fps:?}; {missing} Play names not found next to their timeline",
+        paths.len()
+    );
+    Ok(())
+}
+
+/// `--cast [name]`: every story cutscene's cast (or one cutscene's), read as the player does: models assembled,
+/// clip lists found, every clip parsed; counts failures and cuts the timeline asks for that the clip list lacks.
+fn cast_check(ar: &mut archive::Archive, one: Option<&str>) -> anyhow::Result<()> {
+    let (list, _) = cutscenes::catalogue(ar);
+    let (mut actors, mut failed, mut no_clips, mut clips, mut bad_clips, mut missing_cuts) =
+        (0, 0, 0, 0, 0, 0);
+    let mut kinds = std::collections::BTreeMap::<&str, usize>::new();
+    let mut picks = std::collections::BTreeMap::<String, usize>::new();
+    let mut disagree = 0;
+    for c in list
+        .iter()
+        .filter(|c| c.group == cutscenes::Group::Story && one.is_none_or(|n| c.name == n))
+    {
+        let Ok(t) = ar.read(&c.path).and_then(|b| timeline::Timeline::parse(&b)) else {
+            continue;
+        };
+        let player = cutscene_play::CutscenePlayer::new(ar, &c.path, &t);
+        let plan: Vec<(cast::Spec, cutscene_play::CutPlan)> = player
+            .cast_plan()
+            .into_iter()
+            .map(|(s, k)| (s.clone(), k))
+            .collect();
+        for (spec, cuts) in plan {
+            actors += 1;
+            *kinds
+                .entry(match spec.source {
+                    cast::Source::Ccdata(_) => "character / prop",
+                    cast::Source::Pokemon(_) => "Pokémon",
+                })
+                .or_default() += 1;
+            match cast::prepare(ar, &spec) {
+                Ok(p) => {
+                    if p.cuts.is_empty() {
+                        no_clips += 1;
+                        println!(
+                            "  no clips: {} {} tracn {:?}",
+                            c.name,
+                            spec.key(),
+                            spec.tracn
+                        );
+                    }
+                    for (k, shot) in &cuts {
+                        if *k > p.cuts.len() {
+                            missing_cuts += 1;
+                        }
+                        if let Some((i, how)) = cast::pick_cut(&p.cuts, *k, shot.as_deref()) {
+                            *picks.entry(format!("{how:?}")).or_default() += 1;
+                            // where both rules apply, do they agree?
+                            if how == cast::Pick::ByShot
+                                && (1..=p.cuts.len()).contains(k)
+                                && i != k - 1
+                            {
+                                disagree += 1;
+                                if one.is_some() {
+                                    println!(
+                                        "  {}: cut {k} shot {shot:?} -> clip {} (by number {})",
+                                        spec.key(),
+                                        i + 1,
+                                        k
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    for (m, l) in &p.cuts {
+                        for path in std::iter::once(m).chain(l.iter()) {
+                            clips += 1;
+                            if anim::load(ar, path, "").is_err() {
+                                bad_clips += 1;
+                            }
+                        }
+                    }
+                    if one.is_some() {
+                        println!(
+                            "{} : {} parts' submeshes {}, {} cuts, {} warnings{}",
+                            spec.key(),
+                            match &spec.source {
+                                cast::Source::Ccdata(p) | cast::Source::Pokemon(p) => p.as_str(),
+                            },
+                            p.model.submeshes.len(),
+                            p.cuts.len(),
+                            p.warnings.len(),
+                            p.warnings
+                                .first()
+                                .map(|w| format!(" (first: {w})"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    println!("FAIL {} {}: {e:#}", c.name, spec.key());
+                }
+            }
+        }
+    }
+    println!(
+        "{actors} actors {kinds:?}: {failed} failed, {no_clips} without clips; {clips} clips, {bad_clips} fail to parse; \
+         {missing_cuts} cuts asked for beyond the clip list; picks {picks:?}, by shot and by number differ {disagree}"
+    );
+    Ok(())
+}
+
+/// `--ccdata <path>`: a `.ccdata`'s parts and, for each part model, its mesh (shape) and material names.
+fn ccdata_dump(ar: &mut archive::Archive, path: &str) -> anyhow::Result<()> {
+    let (parts, variants) = cast::ccdata(ar, path)?;
+    let mut names: Vec<&String> = variants.keys().collect();
+    names.sort();
+    for n in names {
+        println!("variant {n}: {:?}", variants[n]);
+    }
+    for p in &parts {
+        if let Some(t) = &p.trmmt
+            && let Ok(g) = cast::trmmt_groups(ar, t, &p.version)
+        {
+            let mut keys: Vec<_> = g.iter().collect();
+            keys.sort();
+            println!("groups of {} ({}): {keys:?}", p.slot, p.version);
+        }
+    }
+    for (slot, m) in parts.iter().map(|p| (p.slot.clone(), p.model.clone())) {
+        print!("{slot}: {m}");
+        match model::load(ar, &m, 0) {
+            Ok(md) => {
+                let mut shapes: Vec<String> = md
+                    .submeshes
+                    .iter()
+                    .map(|s| format!("{} [{}]", s.shape, s.material))
+                    .collect();
+                shapes.dedup();
+                println!();
+                for s in shapes {
+                    println!("    {s}");
+                }
+            }
+            Err(e) => println!("  ({e:#})"),
+        }
+    }
     Ok(())
 }

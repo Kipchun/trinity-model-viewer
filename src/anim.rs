@@ -14,8 +14,9 @@ use crate::skeleton::Local;
 use anyhow::{Result, anyhow, bail};
 use three_d::{InnerSpace, Quat, Vec3};
 
+/// One channel of values over frames (also used by camera animations, `camera_anim.rs`).
 #[derive(Clone)]
-enum Track<T> {
+pub(crate) enum Track<T> {
     None,
     Fixed(T),
     Dynamic(Vec<T>),
@@ -95,12 +96,12 @@ pub fn unpack_quat(x: u16, y: u16, z: u16, c: QuatCodec) -> Quat {
     Quat::new(v[3], v[0], v[1], v[2]).normalize()
 }
 
-fn vec3_at(buf: &[u8], at: usize) -> Result<Vec3> {
+pub(crate) fn vec3_at(buf: &[u8], at: usize) -> Result<Vec3> {
     let f = |k: usize| -> Result<f32> { Ok(f32::from_bits(u32_at(buf, at + 4 * k)?)) };
     Ok(Vec3::new(f(0)?, f(1)?, f(2)?))
 }
 
-fn quat_at(buf: &[u8], at: usize, c: QuatCodec) -> Result<Quat> {
+pub(crate) fn quat_at(buf: &[u8], at: usize, c: QuatCodec) -> Result<Quat> {
     Ok(unpack_quat(
         u16_at(buf, at)?,
         u16_at(buf, at + 2)?,
@@ -111,7 +112,7 @@ fn quat_at(buf: &[u8], at: usize, c: QuatCodec) -> Result<Quat> {
 
 /// Reads one union channel: `kind` is the union type, `value` the table it points to; `size` is the byte size of
 /// one value, `read` reads one at a position.
-fn channel<T>(
+pub(crate) fn channel<T>(
     kind: u8,
     value: Option<Table>,
     size: usize,
@@ -177,10 +178,15 @@ pub fn parse(buf: &[u8], _label: &str, codec: QuatCodec) -> Result<Animation> {
     })
 }
 
-trait Blend: Copy {
+pub(crate) trait Blend: Copy {
     fn blend(a: Self, b: Self, t: f32) -> Self;
 }
 impl Blend for Vec3 {
+    fn blend(a: Self, b: Self, t: f32) -> Self {
+        a + (b - a) * t
+    }
+}
+impl Blend for f32 {
     fn blend(a: Self, b: Self, t: f32) -> Self {
         a + (b - a) * t
     }
@@ -197,7 +203,7 @@ pub fn nlerp(a: Quat, b: Quat, t: f32) -> Quat {
     (a * (1.0 - t) + b * t).normalize()
 }
 
-fn sample<T: Blend>(track: &Track<T>, frame: f32) -> Option<T> {
+pub(crate) fn sample<T: Blend>(track: &Track<T>, frame: f32) -> Option<T> {
     match track {
         Track::None => None,
         Track::Fixed(v) => Some(*v),

@@ -466,7 +466,13 @@ impl EffectsTab {
 }
 
 /// One table cell: `width` wide, content left- or right-aligned and cut short to fit.
-fn cell(ui: &mut egui::Ui, width: f32, height: f32, right: bool, add: impl FnOnce(&mut egui::Ui)) {
+pub(crate) fn cell(
+    ui: &mut egui::Ui,
+    width: f32,
+    height: f32,
+    right: bool,
+    add: impl FnOnce(&mut egui::Ui),
+) {
     let layout = if right {
         egui::Layout::right_to_left(egui::Align::Center)
     } else {
@@ -478,7 +484,7 @@ fn cell(ui: &mut egui::Ui, width: f32, height: f32, right: bool, add: impl FnOnc
     });
 }
 
-fn size_text(bytes: u64) -> String {
+pub(crate) fn size_text(bytes: u64) -> String {
     if bytes >= 1 << 20 {
         format!("{:.1} MB", bytes as f64 / (1u64 << 20) as f64)
     } else {

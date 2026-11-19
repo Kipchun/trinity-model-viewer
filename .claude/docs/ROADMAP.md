@@ -25,7 +25,8 @@ clothing/body textures), `charamotion_*` (274, `.trmdt`, `.tracn`, `.tracr`), `c
 3. **Player (`pc`)**: modular body + clothing (`cm_drs####` dress-up sets). Needs a part picker: assemble
    head, body, tops, bottoms, shoes on one skeleton.
 4. **Character animations**: `.trmdt` (motion data? 385 packs), `.tracn` (22, maybe face/material curves),
-   `.tracp` (cutscene clips). Study with `study-format` before guessing.
+   `.tracp` (cutscene clips). Study with `study-format` before guessing. Cutscene timelines (`.trtml`) are read
+   and listed (Cutscenes tab, 2026-11-18); playing them needs `.trcma`, `.tracp` and `.tracm`.
 5. `.trmmt` (23): material sets / variants. Likely also unlocks Pokémon alternate colours (shiny).
 
 ## Phase 2: static field models (`field_graphic/...`)

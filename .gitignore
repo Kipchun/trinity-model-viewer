@@ -19,6 +19,13 @@ game/
 *.tranm
 *.tracn
 *.tracr
+*.trtml
+*.trcma
+*.tracp
+*.tracm
+*.tracl
+*.ccdata
+*.ccdatam
 *.bntx
 *.trtrr
 *.trtbf
